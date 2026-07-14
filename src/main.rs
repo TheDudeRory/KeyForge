@@ -10,6 +10,7 @@ mod macros;
 mod persist;
 mod settings;
 mod tray;
+mod window;
 
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
@@ -96,6 +97,7 @@ fn main() -> eframe::Result {
         handle: runtime.handle().clone(),
         executions: std::sync::Arc::default(),
         inputs: std::sync::Arc::new(input::Inputs::new()),
+        wm: std::sync::Arc::new(window::NativeWindowManager),
         macros_dir: data.join("macros"),
     };
 

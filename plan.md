@@ -25,7 +25,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
       Driven by hand-written JSON in `macros/`. Heavy unit tests.
 - [x] **M4 Input simulation** — `InputSimulator` trait + enigo impl; keystroke/type/hold/mouse steps;
       held-input tracking → emergency stop releases everything.
-- [ ] **M5 Window management** — `WindowManager` trait; `windows` crate impl (SetForegroundWindow workarounds,
+- [x] **M5 Window management** — `WindowManager` trait; `windows` crate impl (SetForegroundWindow workarounds,
       elevated-window detection) + `x11rb`/EWMH impl; all window steps + window/process conditions;
       WindowSelector matching w/ unit tests vs fake backend.
 - [ ] **M6 Devices & system** — audio enumerate/switch (IPolicyConfig / `pactl`), USB Device-Is-Connected,

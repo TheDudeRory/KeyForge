@@ -1,5 +1,6 @@
 use crate::input::Inputs;
 use crate::macros::{CmpOp, Condition, Macro, MacroLibrary, Param, Step};
+use crate::window::{self, WindowInfo, WindowManager, WindowSelector};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,6 +24,7 @@ pub enum ExecError {
     LoopLimit,
     Eval(String),
     Input(String),
+    Window(String),
     MacroNotFound(String),
     Recursion(String),
 }
@@ -35,6 +37,7 @@ impl std::fmt::Display for ExecError {
             ExecError::LoopLimit => write!(f, "max loop iterations exceeded (runaway guard)"),
             ExecError::Eval(e) => write!(f, "evaluation error: {e}"),
             ExecError::Input(e) => write!(f, "input error: {e}"),
+            ExecError::Window(e) => write!(f, "window error: {e}"),
             ExecError::MacroNotFound(id) => write!(f, "macro not found: {id}"),
             ExecError::Recursion(id) => write!(f, "recursion guard tripped at: {id}"),
         }
@@ -137,11 +140,16 @@ fn compare(op: CmpOp, left: &Value, right: &Value) -> Result<bool, String> {
     }
 }
 
-pub fn eval_condition(cond: &Condition, vars: &HashMap<String, Value>) -> Result<bool, ExecError> {
+pub fn eval_condition(
+    cond: &Condition,
+    vars: &HashMap<String, Value>,
+    wm: &dyn WindowManager,
+) -> Result<bool, ExecError> {
+    let list = || wm.list_windows().map_err(ExecError::Window);
     match cond {
         Condition::All { conditions } => {
             for c in conditions {
-                if !eval_condition(c, vars)? {
+                if !eval_condition(c, vars, wm)? {
                     return Ok(false);
                 }
             }
@@ -149,13 +157,13 @@ pub fn eval_condition(cond: &Condition, vars: &HashMap<String, Value>) -> Result
         }
         Condition::Any { conditions } => {
             for c in conditions {
-                if eval_condition(c, vars)? {
+                if eval_condition(c, vars, wm)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        Condition::Not { condition } => Ok(!eval_condition(condition, vars)?),
+        Condition::Not { condition } => Ok(!eval_condition(condition, vars, wm)?),
         Condition::Expr { expr } => match eval_expr(expr, vars).map_err(ExecError::Eval)? {
             Value::Bool(b) => Ok(b),
             other => Err(ExecError::Eval(format!("condition must be boolean, got {other}: {expr}"))),
@@ -164,6 +172,16 @@ pub fn eval_condition(cond: &Condition, vars: &HashMap<String, Value>) -> Result
             let left = vars.get(variable).cloned().unwrap_or(Value::Null);
             compare(*op, &left, value).map_err(ExecError::Eval)
         }
+        Condition::WindowExists { window } => Ok(window::find_first(window, &list()?).is_some()),
+        Condition::WindowFocused { window } => {
+            Ok(window::find_first(window, &list()?).is_some_and(|w| w.focused))
+        }
+        Condition::WindowTitleMatches { pattern } => {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| ExecError::Eval(format!("bad title regex: {e}")))?;
+            Ok(list()?.iter().any(|w| re.is_match(&w.title)))
+        }
+        Condition::ProcessRunning { name } => Ok(window::process_running(name)),
     }
 }
 
@@ -172,6 +190,7 @@ pub fn eval_condition(cond: &Condition, vars: &HashMap<String, Value>) -> Result
 struct ExecState<'a> {
     lib: &'a MacroLibrary,
     inputs: &'a Inputs,
+    wm: &'a dyn WindowManager,
     vars: HashMap<String, Value>,
     cancel: CancellationToken,
     deadline: Instant,
@@ -181,6 +200,14 @@ struct ExecState<'a> {
 }
 
 impl ExecState<'_> {
+    /// Topmost window matching the selector, or a clear error.
+    fn resolve_window(&self, sel: &WindowSelector) -> Result<WindowInfo, ExecError> {
+        let windows = self.wm.list_windows().map_err(ExecError::Window)?;
+        window::find_first(sel, &windows)
+            .cloned()
+            .ok_or_else(|| ExecError::Window(format!("no window matches {}", window::describe(sel))))
+    }
+
     fn check(&self) -> Result<(), ExecError> {
         if self.cancel.is_cancelled() {
             return Err(ExecError::Cancelled);
@@ -218,7 +245,8 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
             tracing::debug!(step = %step.summary(), depth = st.stack.len(), "step");
             match step {
                 Step::If { condition, then, else_steps } => {
-                    let branch = if eval_condition(condition, &st.vars)? { then } else { else_steps };
+                    let branch =
+                        if eval_condition(condition, &st.vars, st.wm)? { then } else { else_steps };
                     match run_steps(branch, st).await? {
                         Flow::Next => {}
                         other => return Ok(other),
@@ -236,7 +264,7 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     }
                 }
                 Step::While { condition, steps } => {
-                    while eval_condition(condition, &st.vars)? {
+                    while eval_condition(condition, &st.vars, st.wm)? {
                         st.check()?;
                         st.count_loop()?;
                         match run_steps(steps, st).await? {
@@ -255,7 +283,7 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     let until = Instant::now() + Duration::from_millis(*timeout_ms);
                     loop {
                         st.check()?;
-                        if eval_condition(condition, &st.vars)? {
+                        if eval_condition(condition, &st.vars, st.wm)? {
                             break;
                         }
                         if Instant::now() >= until {
@@ -321,9 +349,16 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     let key = eval_string(key, &st.vars)?;
                     st.inputs.release_key(&key).map_err(ExecError::Input)?;
                 }
-                Step::MouseMove { x, y, relative } => {
-                    let (x, y) = (eval_i64(x, &st.vars)?, eval_i64(y, &st.vars)?);
-                    st.inputs.mouse_move(x as i32, y as i32, *relative).map_err(ExecError::Input)?;
+                Step::MouseMove { x, y, relative, window } => {
+                    let (mut x, mut y) = (eval_i64(x, &st.vars)? as i32, eval_i64(y, &st.vars)? as i32);
+                    let mut relative = *relative;
+                    if let Some(sel) = window {
+                        let win = st.resolve_window(sel)?;
+                        x += win.rect.0;
+                        y += win.rect.1;
+                        relative = false;
+                    }
+                    st.inputs.mouse_move(x, y, relative).map_err(ExecError::Input)?;
                 }
                 Step::MouseClick { button, double } => {
                     st.inputs.click(*button, *double).map_err(ExecError::Input)?;
@@ -337,6 +372,71 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     let amount = eval_i64(amount, &st.vars)?;
                     st.inputs.scroll(*direction, amount as i32).map_err(ExecError::Input)?;
                 }
+                Step::FocusWindow { window } => {
+                    let win = st.resolve_window(window)?;
+                    st.wm.focus(win.id).map_err(ExecError::Window)?;
+                }
+                Step::MoveResizeWindow { window, x, y, w, h } => {
+                    let win = st.resolve_window(window)?;
+                    let dim = |p: &Option<Param<Value>>| -> Result<Option<window::Dim>, ExecError> {
+                        match p {
+                            None => Ok(None),
+                            Some(p) => window::parse_dim(&eval_value(p, &st.vars)?)
+                                .map(Some)
+                                .map_err(ExecError::Eval),
+                        }
+                    };
+                    let monitors = st.wm.monitors().map_err(ExecError::Window)?;
+                    let mon = window::monitor_for(win.rect, &monitors)
+                        .ok_or_else(|| ExecError::Window("no monitors".into()))?;
+                    let (x, y, w, h) =
+                        window::resolve_rect(win.rect, &mon, dim(x)?, dim(y)?, dim(w)?, dim(h)?);
+                    st.wm.move_resize(win.id, x, y, w, h).map_err(ExecError::Window)?;
+                }
+                Step::MinimizeWindow { window } => {
+                    let win = st.resolve_window(window)?;
+                    st.wm.minimize(win.id).map_err(ExecError::Window)?;
+                }
+                Step::MaximizeWindow { window } => {
+                    let win = st.resolve_window(window)?;
+                    st.wm.maximize(win.id).map_err(ExecError::Window)?;
+                }
+                Step::RestoreWindow { window } => {
+                    let win = st.resolve_window(window)?;
+                    st.wm.restore(win.id).map_err(ExecError::Window)?;
+                }
+                Step::CloseWindow { window } => {
+                    let win = st.resolve_window(window)?;
+                    st.wm.close(win.id).map_err(ExecError::Window)?;
+                }
+                Step::ToggleAlwaysOnTop { window } => {
+                    let win = st.resolve_window(window)?;
+                    let on = st.wm.always_on_top(win.id).map_err(ExecError::Window)?;
+                    st.wm.set_always_on_top(win.id, !on).map_err(ExecError::Window)?;
+                }
+                Step::MoveWindowToMonitor { window, monitor } => {
+                    let win = st.resolve_window(window)?;
+                    let n = eval_i64(monitor, &st.vars)?;
+                    let monitors = st.wm.monitors().map_err(ExecError::Window)?;
+                    let target = monitors.get((n - 1).max(0) as usize).ok_or_else(|| {
+                        ExecError::Window(format!("monitor {n} of {} does not exist", monitors.len()))
+                    })?;
+                    let current = window::monitor_for(win.rect, &monitors)
+                        .ok_or_else(|| ExecError::Window("no monitors".into()))?;
+                    // keep size, translate by monitor-origin delta
+                    let (x, y) = (
+                        win.rect.0 - current.x + target.x,
+                        win.rect.1 - current.y + target.y,
+                    );
+                    st.wm.move_resize(win.id, x, y, win.rect.2, win.rect.3)
+                        .map_err(ExecError::Window)?;
+                }
+                Step::SetWindowTransparency { window, percent } => {
+                    let win = st.resolve_window(window)?;
+                    let pct = eval_i64(percent, &st.vars)?.clamp(0, 100);
+                    let alpha = (pct * 255 / 100) as u8;
+                    st.wm.set_transparency(win.id, alpha).map_err(ExecError::Window)?;
+                }
             }
         }
         Ok(Flow::Next)
@@ -349,11 +449,13 @@ pub async fn execute_macro(
     mac: &Macro,
     lib: &MacroLibrary,
     inputs: &Inputs,
+    wm: &dyn WindowManager,
     cancel: CancellationToken,
 ) -> Result<Outcome, ExecError> {
     let mut st = ExecState {
         lib,
         inputs,
+        wm,
         vars: HashMap::new(),
         cancel,
         deadline: Instant::now()
@@ -416,6 +518,7 @@ pub struct Dispatcher {
     pub handle: tokio::runtime::Handle,
     pub executions: Arc<Executions>,
     pub inputs: Arc<Inputs>,
+    pub wm: Arc<dyn WindowManager>,
     pub macros_dir: PathBuf,
 }
 
@@ -440,11 +543,12 @@ impl Dispatcher {
         let (run_id, token) = self.executions.register(&mac.name);
         let executions = Arc::clone(&self.executions);
         let inputs = Arc::clone(&self.inputs);
+        let wm = Arc::clone(&self.wm);
         self.handle.spawn(async move {
             let started = Instant::now();
             tracing::info!(id = %mac.id, name = %mac.name, run_id, "macro started");
             let elapsed = move || started.elapsed().as_millis() as u64;
-            match execute_macro(&mac, &lib, &inputs, token).await {
+            match execute_macro(&mac, &lib, &inputs, wm.as_ref(), token).await {
                 Ok(outcome) => {
                     // A completed macro keeps deliberate holds; abnormal ends release.
                     tracing::info!(name = %mac.name, run_id, ?outcome, elapsed_ms = elapsed(), "macro finished")
@@ -507,9 +611,11 @@ mod tests {
     async fn run_in_lib(m: Macro, lib: MacroLibrary) -> (Result<Outcome, ExecError>, HashMap<String, Value>) {
         let (sim, _) = crate::input::test_support::RecordingSim::new();
         let inputs = Inputs::with_backend(sim);
+        let wm = crate::window::test_support::FakeWm::default();
         let mut st = ExecState {
             lib: &lib,
             inputs: &inputs,
+            wm: &wm,
             vars: HashMap::new(),
             cancel: CancellationToken::new(),
             deadline: Instant::now() + Duration::from_millis(m.max_runtime_ms.unwrap_or(DEFAULT_MAX_RUNTIME_MS)),
@@ -604,9 +710,10 @@ mod tests {
         let lib = MacroLibrary::default();
         let (sim, _) = crate::input::test_support::RecordingSim::new();
         let inputs = Inputs::with_backend(sim);
+        let wm = crate::window::test_support::FakeWm::default();
         let token = CancellationToken::new();
         token.cancel();
-        let err = execute_macro(&m, &lib, &inputs, token).await.unwrap_err();
+        let err = execute_macro(&m, &lib, &inputs, &wm, token).await.unwrap_err();
         assert_eq!(err, ExecError::Cancelled);
     }
 
@@ -618,12 +725,13 @@ mod tests {
             set("combo", json!("Ctrl+C")),
             Step::SendKeystroke { keys: Param::Expr { expr: "combo".into() } },
             Step::TypeText { text: Param::Literal("hi".into()), char_delay_ms: 50 },
-            Step::MouseMove { x: Param::Literal(10), y: Param::Literal(20), relative: false },
+            Step::MouseMove { x: Param::Literal(10), y: Param::Literal(20), relative: false, window: None },
             Step::MouseClick { button: crate::macros::MouseButton::Left, double: false },
             Step::Scroll { direction: crate::macros::ScrollDirection::Down, amount: Param::Literal(3) },
         ]);
         let lib = MacroLibrary::default();
-        let out = execute_macro(&m, &lib, &inputs, CancellationToken::new()).await;
+        let wm = crate::window::test_support::FakeWm::default();
+        let out = execute_macro(&m, &lib, &inputs, &wm, CancellationToken::new()).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
         assert_eq!(
             *events.lock().unwrap(),
@@ -650,13 +758,14 @@ mod tests {
             Step::Wait { ms: Param::Literal(60_000) },
         ]);
         let lib = MacroLibrary::default();
+        let wm = crate::window::test_support::FakeWm::default();
         let token = CancellationToken::new();
         let cancel = token.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             cancel.cancel();
         });
-        let err = execute_macro(&m, &lib, &inputs, token).await.unwrap_err();
+        let err = execute_macro(&m, &lib, &inputs, &wm, token).await.unwrap_err();
         task.await.unwrap();
         assert_eq!(err, ExecError::Cancelled);
         // what the dispatcher does on abnormal end:
@@ -732,19 +841,90 @@ mod tests {
 
     #[test]
     fn condition_groups() {
+        let wm = crate::window::test_support::FakeWm::default();
         let vars = HashMap::from([("n".to_string(), json!(5))]);
         let t = Condition::Expr { expr: "n == 5".into() };
         let f = Condition::Expr { expr: "n == 6".into() };
         let all = Condition::All { conditions: vec![t.clone(), f.clone()] };
         let any = Condition::Any { conditions: vec![f.clone(), t.clone()] };
         let not = Condition::Not { condition: Box::new(f.clone()) };
-        assert!(!eval_condition(&all, &vars).unwrap());
-        assert!(eval_condition(&any, &vars).unwrap());
-        assert!(eval_condition(&not, &vars).unwrap());
+        assert!(!eval_condition(&all, &vars, &wm).unwrap());
+        assert!(eval_condition(&any, &vars, &wm).unwrap());
+        assert!(eval_condition(&not, &vars, &wm).unwrap());
         // missing variable compares as null
         let missing = Condition::VariableComparison { variable: "ghost".into(), op: CmpOp::Eq, value: Value::Null };
-        assert!(eval_condition(&missing, &vars).unwrap());
+        assert!(eval_condition(&missing, &vars, &wm).unwrap());
         // non-boolean condition expression is an error
-        assert!(eval_condition(&Condition::Expr { expr: "1 + 1".into() }, &vars).is_err());
+        assert!(eval_condition(&Condition::Expr { expr: "1 + 1".into() }, &vars, &wm).is_err());
+    }
+
+    #[test]
+    fn window_conditions_against_fake() {
+        use crate::window::{TitleMatch, WindowSelector};
+        let wm = crate::window::test_support::FakeWm::default();
+        let vars = HashMap::new();
+        let exists = Condition::WindowExists {
+            window: WindowSelector::Title { mode: TitleMatch::Contains, value: "notepad".into() },
+        };
+        let focused_kf = Condition::WindowFocused {
+            window: WindowSelector::Process { name: "keyforge".into() },
+        };
+        let focused_np = Condition::WindowFocused {
+            window: WindowSelector::Process { name: "notepad".into() },
+        };
+        let title_re = Condition::WindowTitleMatches { pattern: r"readme\.\w+ - Notepad".into() };
+        assert!(eval_condition(&exists, &vars, &wm).unwrap());
+        assert!(eval_condition(&focused_kf, &vars, &wm).unwrap());
+        assert!(!eval_condition(&focused_np, &vars, &wm).unwrap());
+        assert!(eval_condition(&title_re, &vars, &wm).unwrap());
+    }
+
+    #[tokio::test]
+    async fn window_steps_drive_manager() {
+        use crate::window::{test_support::FakeWm, WindowSelector};
+        let (sim, _) = crate::input::test_support::RecordingSim::new();
+        let inputs = Inputs::with_backend(sim);
+        let wm = FakeWm::default();
+        let sel = WindowSelector::Process { name: "notepad".into() };
+        let m = mac("t", vec![
+            Step::FocusWindow { window: sel.clone() },
+            Step::MoveResizeWindow {
+                window: sel.clone(),
+                x: Some(Param::Literal(json!("10%"))),
+                y: Some(Param::Literal(json!(0))),
+                w: Some(Param::Literal(json!("50%"))),
+                h: None,
+            },
+            Step::ToggleAlwaysOnTop { window: sel.clone() },
+            Step::SetWindowTransparency { window: sel.clone(), percent: Param::Literal(80) },
+            Step::CloseWindow { window: sel.clone() },
+        ]);
+        let lib = MacroLibrary::default();
+        let out = execute_macro(&m, &lib, &inputs, &wm, CancellationToken::new()).await;
+        assert_eq!(out.unwrap(), Outcome::Completed);
+        assert_eq!(
+            *wm.calls.lock().unwrap(),
+            vec![
+                "focus 1",
+                // monitor 1920x1080: x=10% → 192, y=0, w=50% → 960, h kept (200)
+                "move_resize 1 192,0 960x200",
+                "set_always_on_top 1 true",
+                "set_transparency 1 204",
+                "close 1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_window_is_clear_error() {
+        let (sim, _) = crate::input::test_support::RecordingSim::new();
+        let inputs = Inputs::with_backend(sim);
+        let wm = crate::window::test_support::FakeWm::default();
+        let m = mac("t", vec![Step::FocusWindow {
+            window: crate::window::WindowSelector::Process { name: "ghost".into() },
+        }]);
+        let lib = MacroLibrary::default();
+        let err = execute_macro(&m, &lib, &inputs, &wm, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(err, ExecError::Window(msg) if msg.contains("ghost")));
     }
 }

@@ -1,3 +1,4 @@
+use crate::window::WindowSelector;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,7 +39,12 @@ pub enum Condition {
     /// Escape hatch: arbitrary Rhai boolean expression.
     Expr { expr: String },
     VariableComparison { variable: String, op: CmpOp, value: serde_json::Value },
-    // OS-backed conditions (window/process/device/pixel/...) land with M5/M6.
+    WindowExists { window: WindowSelector },
+    WindowFocused { window: WindowSelector },
+    /// Regex over all visible window titles.
+    WindowTitleMatches { pattern: String },
+    ProcessRunning { name: String },
+    // device/pixel/file/time conditions land with M6.
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -129,10 +135,11 @@ pub enum Step {
     MouseMove {
         x: Param<i64>,
         y: Param<i64>,
-        // ponytail: absolute/relative only; window-relative mode arrives with
-        // the WindowManager in M5.
         #[serde(default)]
         relative: bool,
+        /// When set, x/y are relative to this window's top-left corner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<WindowSelector>,
     },
     MouseClick {
         #[serde(default)]
@@ -151,6 +158,47 @@ pub enum Step {
     Scroll {
         direction: ScrollDirection,
         amount: Param<i64>,
+    },
+    FocusWindow {
+        window: WindowSelector,
+    },
+    /// Omitted fields keep their current value; values are pixels or "NN%"
+    /// of the window's monitor work area.
+    MoveResizeWindow {
+        window: WindowSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<Param<serde_json::Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<Param<serde_json::Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        w: Option<Param<serde_json::Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        h: Option<Param<serde_json::Value>>,
+    },
+    MinimizeWindow {
+        window: WindowSelector,
+    },
+    MaximizeWindow {
+        window: WindowSelector,
+    },
+    RestoreWindow {
+        window: WindowSelector,
+    },
+    CloseWindow {
+        window: WindowSelector,
+    },
+    ToggleAlwaysOnTop {
+        window: WindowSelector,
+    },
+    /// 1-based monitor index, left-to-right.
+    MoveWindowToMonitor {
+        window: WindowSelector,
+        monitor: Param<i64>,
+    },
+    /// Opacity percent: 0 = invisible, 100 = opaque. Windows only.
+    SetWindowTransparency {
+        window: WindowSelector,
+        percent: Param<i64>,
     },
 }
 
@@ -186,8 +234,12 @@ impl Step {
             }
             Step::HoldKey { key } => format!("Hold {}", param_summary(key)),
             Step::ReleaseKey { key } => format!("Release {}", param_summary(key)),
-            Step::MouseMove { x, y, relative } => {
-                let how = if *relative { "by" } else { "to" };
+            Step::MouseMove { x, y, relative, window } => {
+                let how = match (window, relative) {
+                    (Some(sel), _) => format!("in {}", crate::window::describe(sel)),
+                    (None, true) => "by".into(),
+                    (None, false) => "to".into(),
+                };
                 format!("Mouse move {how} ({}, {})", param_summary(x), param_summary(y))
             }
             Step::MouseClick { button, double } => {
@@ -203,6 +255,27 @@ impl Step {
             Step::Scroll { direction, amount } => {
                 format!("Scroll {direction:?} {}", param_summary(amount))
             }
+            Step::FocusWindow { window } => format!("Focus {}", crate::window::describe(window)),
+            Step::MoveResizeWindow { window, .. } => {
+                format!("Move/resize {}", crate::window::describe(window))
+            }
+            Step::MinimizeWindow { window } => format!("Minimize {}", crate::window::describe(window)),
+            Step::MaximizeWindow { window } => format!("Maximize {}", crate::window::describe(window)),
+            Step::RestoreWindow { window } => format!("Restore {}", crate::window::describe(window)),
+            Step::CloseWindow { window } => format!("Close {}", crate::window::describe(window)),
+            Step::ToggleAlwaysOnTop { window } => {
+                format!("Toggle always-on-top {}", crate::window::describe(window))
+            }
+            Step::MoveWindowToMonitor { window, monitor } => format!(
+                "Move {} to monitor {}",
+                crate::window::describe(window),
+                param_summary(monitor)
+            ),
+            Step::SetWindowTransparency { window, percent } => format!(
+                "Set {} opacity {}%",
+                crate::window::describe(window),
+                param_summary(percent)
+            ),
         }
     }
 }
