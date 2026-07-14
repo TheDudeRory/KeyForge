@@ -1,6 +1,6 @@
 use crate::audio::AudioDeviceManager;
 use crate::input::Inputs;
-use crate::macros::{CmpOp, Condition, Macro, MacroLibrary, Param, Step};
+use crate::macros::{Block, CmpOp, Condition, Macro, MacroLibrary, Param, Step};
 use crate::usb::UsbEnumerator;
 use crate::window::{self, WindowInfo, WindowManager, WindowSelector};
 
@@ -285,10 +285,15 @@ impl ExecState<'_> {
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<Flow, ExecError>> + Send + 'a>>;
 
-fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFuture<'a> {
+fn run_steps<'a, 'b: 'a>(steps: &'a [Block], st: &'a mut ExecState<'b>) -> StepFuture<'a> {
     Box::pin(async move {
-        for step in steps {
+        for block in steps {
             st.check()?;
+            if block.disabled {
+                tracing::debug!(step = %block.step.summary(), "step disabled, skipped");
+                continue;
+            }
+            let step = &block.step;
             tracing::debug!(step = %step.summary(), depth = st.stack.len(), "step");
             match step {
                 Step::If { condition, then, else_steps } => {
@@ -532,6 +537,21 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     let muted = st.services.audio.toggle_mute().map_err(ExecError::Input)?;
                     tracing::debug!(muted, "mute toggled");
                 }
+                Step::ConfirmDialog { message } => {
+                    let message = eval_string(message, &st.vars)?;
+                    let confirmed = tokio::select! {
+                        result = rfd::AsyncMessageDialog::new()
+                            .set_title("KeyForge")
+                            .set_description(&message)
+                            .set_buttons(rfd::MessageButtons::OkCancel)
+                            .show() => matches!(result, rfd::MessageDialogResult::Ok),
+                        _ = st.cancel.cancelled() => return Err(ExecError::Cancelled),
+                    };
+                    if !confirmed {
+                        tracing::info!("confirm dialog cancelled — stopping macro");
+                        return Ok(Flow::Stop);
+                    }
+                }
             }
         }
         Ok(Flow::Next)
@@ -670,7 +690,11 @@ mod tests {
     use crate::macros::SCHEMA_VERSION;
     use serde_json::json;
 
-    fn mac(id: &str, steps: Vec<Step>) -> Macro {
+    fn blk(step: Step) -> Block {
+        step.into()
+    }
+
+    fn mac(id: &str, steps: Vec<Block>) -> Macro {
         Macro {
             schema_version: SCHEMA_VERSION,
             id: id.into(),
@@ -682,12 +706,12 @@ mod tests {
         }
     }
 
-    fn set(name: &str, v: serde_json::Value) -> Step {
-        Step::SetVariable { name: name.into(), value: Param::Literal(v) }
+    fn set(name: &str, v: serde_json::Value) -> Block {
+        blk(Step::SetVariable { name: name.into(), value: Param::Literal(v) })
     }
 
-    fn set_expr(name: &str, expr: &str) -> Step {
-        Step::SetVariable { name: name.into(), value: Param::Expr { expr: expr.into() } }
+    fn set_expr(name: &str, expr: &str) -> Block {
+        blk(Step::SetVariable { name: name.into(), value: Param::Expr { expr: expr.into() } })
     }
 
     fn var_is(name: &str, v: serde_json::Value) -> Condition {
@@ -789,11 +813,11 @@ mod tests {
     async fn set_if_else() {
         let m = mac("t", vec![
             set("n", json!(2)),
-            Step::If {
+            blk(Step::If {
                 condition: var_is("n", json!(2)),
                 then: vec![set("r", json!("yes"))],
                 else_steps: vec![set("r", json!("no"))],
-            },
+            }),
         ]);
         let (out, vars) = run(m).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
@@ -804,17 +828,17 @@ mod tests {
     async fn loop_with_break_and_expr() {
         let m = mac("t", vec![
             set("n", json!(0)),
-            Step::Loop {
+            blk(Step::Loop {
                 times: Param::Expr { expr: "5 + 5".into() },
                 steps: vec![
                     set_expr("n", "n + 1"),
-                    Step::If {
+                    blk(Step::If {
                         condition: Condition::Expr { expr: "n >= 3".into() },
-                        then: vec![Step::Break],
+                        then: vec![blk(Step::Break)],
                         else_steps: vec![],
-                    },
+                    }),
                 ],
-            },
+            }),
         ]);
         let (out, vars) = run(m).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
@@ -825,10 +849,10 @@ mod tests {
     async fn while_loop() {
         let m = mac("t", vec![
             set("n", json!(0)),
-            Step::While {
+            blk(Step::While {
                 condition: Condition::Expr { expr: "n < 5".into() },
                 steps: vec![set_expr("n", "n + 1")],
-            },
+            }),
         ]);
         let (_, vars) = run(m).await;
         assert_eq!(vars["n"], json!(5));
@@ -836,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_skips_rest() {
-        let m = mac("t", vec![set("a", json!(1)), Step::StopMacro, set("b", json!(2))]);
+        let m = mac("t", vec![set("a", json!(1)), blk(Step::StopMacro), set("b", json!(2))]);
         let (out, vars) = run(m).await;
         assert_eq!(out.unwrap(), Outcome::Stopped);
         assert!(!vars.contains_key("b"));
@@ -844,10 +868,10 @@ mod tests {
 
     #[tokio::test]
     async fn loop_limit_guard() {
-        let mut m = mac("t", vec![Step::While {
+        let mut m = mac("t", vec![blk(Step::While {
             condition: Condition::Expr { expr: "true".into() },
             steps: vec![],
-        }]);
+        })]);
         m.max_loop_iterations = Some(5);
         let (out, _) = run(m).await;
         assert_eq!(out.unwrap_err(), ExecError::LoopLimit);
@@ -855,7 +879,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn runtime_limit_guard() {
-        let mut m = mac("t", vec![Step::Wait { ms: Param::Literal(60_000) }]);
+        let mut m = mac("t", vec![blk(Step::Wait { ms: Param::Literal(60_000) })]);
         m.max_runtime_ms = Some(100);
         let (out, _) = run(m).await;
         assert_eq!(out.unwrap_err(), ExecError::RuntimeLimit);
@@ -863,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation() {
-        let m = mac("t", vec![Step::Wait { ms: Param::Literal(60_000) }]);
+        let m = mac("t", vec![blk(Step::Wait { ms: Param::Literal(60_000) })]);
         let lib = MacroLibrary::default();
         let (services, _) = fake_services();
         let token = CancellationToken::new();
@@ -878,11 +902,11 @@ mod tests {
         let events = handles.input_events;
         let m = mac("t", vec![
             set("combo", json!("Ctrl+C")),
-            Step::SendKeystroke { keys: Param::Expr { expr: "combo".into() } },
-            Step::TypeText { text: Param::Literal("hi".into()), char_delay_ms: 50 },
-            Step::MouseMove { x: Param::Literal(10), y: Param::Literal(20), relative: false, window: None },
-            Step::MouseClick { button: crate::macros::MouseButton::Left, double: false },
-            Step::Scroll { direction: crate::macros::ScrollDirection::Down, amount: Param::Literal(3) },
+            blk(Step::SendKeystroke { keys: Param::Expr { expr: "combo".into() } }),
+            blk(Step::TypeText { text: Param::Literal("hi".into()), char_delay_ms: 50 }),
+            blk(Step::MouseMove { x: Param::Literal(10), y: Param::Literal(20), relative: false, window: None }),
+            blk(Step::MouseClick { button: crate::macros::MouseButton::Left, double: false }),
+            blk(Step::Scroll { direction: crate::macros::ScrollDirection::Down, amount: Param::Literal(3) }),
         ]);
         let lib = MacroLibrary::default();
         let out = execute_macro(&m, &lib, &services, CancellationToken::new()).await;
@@ -907,8 +931,8 @@ mod tests {
     async fn abnormal_end_release_path_reports_held() {
         let (services, _) = fake_services();
         let m = mac("t", vec![
-            Step::HoldKey { key: Param::Literal("Shift".into()) },
-            Step::Wait { ms: Param::Literal(60_000) },
+            blk(Step::HoldKey { key: Param::Literal("Shift".into()) }),
+            blk(Step::Wait { ms: Param::Literal(60_000) }),
         ]);
         let lib = MacroLibrary::default();
         let token = CancellationToken::new();
@@ -926,12 +950,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn wait_until_timeout_branch() {
-        let m = mac("t", vec![Step::WaitUntil {
+        let m = mac("t", vec![blk(Step::WaitUntil {
             condition: var_is("never", json!(true)),
             poll_ms: 50,
             timeout_ms: 500,
             on_timeout: vec![set("r", json!("timed out"))],
-        }]);
+        })]);
         let (out, vars) = run(m).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
         assert_eq!(vars["r"], json!("timed out"));
@@ -941,12 +965,12 @@ mod tests {
     async fn wait_until_already_true() {
         let m = mac("t", vec![
             set("go", json!(true)),
-            Step::WaitUntil {
+            blk(Step::WaitUntil {
                 condition: var_is("go", json!(true)),
                 poll_ms: 50,
                 timeout_ms: 10_000,
                 on_timeout: vec![set("r", json!("timed out"))],
-            },
+            }),
         ]);
         let (out, vars) = run(m).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
@@ -957,12 +981,12 @@ mod tests {
     async fn run_macro_shares_vars_and_detects_recursion() {
         let sub = mac("sub", vec![set_expr("n", "n * 10")]);
         let lib = library_of(vec![sub]);
-        let m = mac("t", vec![set("n", json!(4)), Step::RunMacro { id: "sub".into() }]);
+        let m = mac("t", vec![set("n", json!(4)), blk(Step::RunMacro { id: "sub".into() })]);
         let (out, vars) = run_in_lib(m, lib).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
         assert_eq!(vars["n"], json!(40));
 
-        let selfcall = mac("loopy", vec![Step::RunMacro { id: "loopy".into() }]);
+        let selfcall = mac("loopy", vec![blk(Step::RunMacro { id: "loopy".into() })]);
         let lib = library_of(vec![selfcall.clone()]);
         let (out, _) = run_in_lib(selfcall, lib).await;
         assert!(matches!(out.unwrap_err(), ExecError::Recursion(_)));
@@ -1037,17 +1061,17 @@ mod tests {
         let (services, handles) = fake_services();
         let sel = WindowSelector::Process { name: "notepad".into() };
         let m = mac("t", vec![
-            Step::FocusWindow { window: sel.clone() },
-            Step::MoveResizeWindow {
+            blk(Step::FocusWindow { window: sel.clone() }),
+            blk(Step::MoveResizeWindow {
                 window: sel.clone(),
                 x: Some(Param::Literal(json!("10%"))),
                 y: Some(Param::Literal(json!(0))),
                 w: Some(Param::Literal(json!("50%"))),
                 h: None,
-            },
-            Step::ToggleAlwaysOnTop { window: sel.clone() },
-            Step::SetWindowTransparency { window: sel.clone(), percent: Param::Literal(80) },
-            Step::CloseWindow { window: sel.clone() },
+            }),
+            blk(Step::ToggleAlwaysOnTop { window: sel.clone() }),
+            blk(Step::SetWindowTransparency { window: sel.clone(), percent: Param::Literal(80) }),
+            blk(Step::CloseWindow { window: sel.clone() }),
         ]);
         let lib = MacroLibrary::default();
         let out = execute_macro(&m, &lib, &services, CancellationToken::new()).await;
@@ -1068,9 +1092,9 @@ mod tests {
     #[tokio::test]
     async fn missing_window_is_clear_error() {
         let (services, _) = fake_services();
-        let m = mac("t", vec![Step::FocusWindow {
+        let m = mac("t", vec![blk(Step::FocusWindow {
             window: crate::window::WindowSelector::Process { name: "ghost".into() },
-        }]);
+        })]);
         let lib = MacroLibrary::default();
         let err = execute_macro(&m, &lib, &services, CancellationToken::new()).await.unwrap_err();
         assert!(matches!(err, ExecError::Window(msg) if msg.contains("ghost")));
@@ -1080,10 +1104,10 @@ mod tests {
     async fn audio_and_device_steps() {
         let (services, handles) = fake_services();
         let m = mac("t", vec![
-            Step::SetDefaultAudioDevice { name: Param::Literal("headphones".into()), input: false },
-            Step::AdjustVolume { delta: Param::Literal(-10) },
-            Step::MuteToggle,
-            Step::If {
+            blk(Step::SetDefaultAudioDevice { name: Param::Literal("headphones".into()), input: false }),
+            blk(Step::AdjustVolume { delta: Param::Literal(-10) }),
+            blk(Step::MuteToggle),
+            blk(Step::If {
                 condition: Condition::All {
                     conditions: vec![
                         Condition::DeviceConnected { device: "046d:c52b".into() },
@@ -1095,7 +1119,7 @@ mod tests {
                 },
                 then: vec![set("verdict", json!("devices ok"))],
                 else_steps: vec![],
-            },
+            }),
         ]);
         let lib = MacroLibrary::default();
         let (out, vars) = {
@@ -1125,8 +1149,8 @@ mod tests {
         let file = std::env::temp_dir().join(format!("keyforge_m6_{}.txt", std::process::id()));
         std::fs::write(&file, "x").unwrap();
         let m = mac("t", vec![
-            Step::RunShellCommand { command: Param::Literal("echo from-macro".into()), timeout_ms: None },
-            Step::If {
+            blk(Step::RunShellCommand { command: Param::Literal("echo from-macro".into()), timeout_ms: None }),
+            blk(Step::If {
                 condition: Condition::All {
                     conditions: vec![
                         Condition::VariableComparison {
@@ -1148,7 +1172,7 @@ mod tests {
                 },
                 then: vec![set("verdict", json!("sys ok"))],
                 else_steps: vec![],
-            },
+            }),
         ]);
         let (out, vars) = run(m).await;
         let _ = std::fs::remove_file(&file);

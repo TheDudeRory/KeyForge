@@ -23,4 +23,10 @@
 - **M6: pixel color via `GetPixel`** (one pixel, instant) instead of the xcap full-screenshot route; Linux pixel/pactl/sysfs paths are compiled but untested-on-this-box (`ponytail:` comments mark them) — verify on first Linux run.
 - **M6: shell command** runs `cmd /C` / `sh -c`, captures into fixed variables `shell_stdout`, `shell_stderr`, `shell_exit_code` (trailing newline stripped), default timeout 30 s, killed on timeout/cancellation.
 - **M6: per-app volume deferred** — master volume/mute only; per-app needs audio-session enumeration, add if a macro ever needs it.
+- **M7: `Block` wrapper** (`{disabled, #[serde(flatten)] step}`) carries the disable flag next to each step's own fields in JSON — enabled blocks omit it entirely, so diffs stay clean. Every child list is `Vec<Block>`.
+- **M7: egui `dnd_drag_source` steals presses** (its `Sense::drag` overlay wins), so palette entries are plain `click_and_drag` buttons that call `DragAndDrop::set_payload` on `drag_started` — click appends, drag places. Block moves are pure `move_block` logic with index/path adjustment, unit-tested (incl. the container-path-shift case and refusing drops into a block's own children).
+- **M7: crosshair pickers replaced by a 3-second hover-countdown capture** (position + pixel color under cursor, live preview while armed). A true click-to-pick overlay needs the global mouse listener that arrives with M10's recorder — upgrade then. The window picker is a live-list popup for the same reason.
+- **M7: macro ids are timestamp-based** (`m-<nanos hex>`), not uuids — no new dependency for local uniqueness. Deleting a macro renames to `.json.deleted` rather than destroying it.
+- **M7: undo/redo = whole-macro snapshots**, one per changed frame, capped at 100 — spec explicitly blesses this ("macros are small, don't over-engineer").
+- **M7: Confirm Dialog step added** (rfd async OK/Cancel; Cancel stops the macro) — completes the control-flow catalog.
 - **eframe 0.35 API**: `App::update` was split into `logic()` (no painting) + `ui(&mut Ui)`, and `TopBottomPanel`/`SidePanel` merged into `egui::Panel`. Code follows the new API.

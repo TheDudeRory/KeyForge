@@ -30,7 +30,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
       WindowSelector matching w/ unit tests vs fake backend.
 - [x] **M6 Devices & system** — audio enumerate/switch (IPolicyConfig / `pactl`), USB Device-Is-Connected,
       clipboard, notifications, shell command w/ output capture, remaining conditions (pixel color, file, time).
-- [ ] **M7 Visual editor** — block palette, nested block list, drag-reorder, cut/copy/paste/duplicate/disable,
+- [x] **M7 Visual editor** — block palette, nested block list, drag-reorder, cut/copy/paste/duplicate/disable,
       param widgets (key capture, window picker, position picker, device dropdowns), undo/redo, save validation.
 - [ ] **M8 Test run & debugging** — live block highlight, variable inspector, step-through, inline validation warnings.
 - [ ] **M9 Event triggers** — device connect/disconnect, window open/close, app-start, timer/schedule triggers.

@@ -32,6 +32,7 @@ pub struct KeyForgeApp {
     engine: Result<HotkeyEngine, String>,
     dispatcher: Dispatcher,
     macro_list: MacroLibrary,
+    editor: Option<crate::editor::Editor>,
     devices: Option<(std::time::Instant, Vec<crate::audio::AudioDevice>, Vec<crate::usb::UsbDevice>)>,
     tab: Tab,
     tray: Tray,
@@ -74,6 +75,7 @@ impl KeyForgeApp {
             engine,
             dispatcher,
             macro_list,
+            editor: None,
             devices: None,
             tab: Tab::Bindings,
             tray,
@@ -205,36 +207,90 @@ impl KeyForgeApp {
         }
     }
 
+    fn macros_tab(&mut self, ui: &mut egui::Ui) {
+        if let Some(editor) = &mut self.editor {
+            match editor.ui(ui, &self.dispatcher.services, &self.macro_list) {
+                crate::editor::EditorEvent::Saved => {
+                    self.macro_list = MacroLibrary::load(&self.dispatcher.macros_dir);
+                }
+                crate::editor::EditorEvent::Closed => self.editor = None,
+                crate::editor::EditorEvent::None => {}
+            }
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            if ui.button("＋ New macro").clicked() {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let id = format!("m-{nanos:x}");
+                let mac = crate::macros::Macro {
+                    schema_version: crate::macros::SCHEMA_VERSION,
+                    id: id.clone(),
+                    name: "New macro".into(),
+                    description: String::new(),
+                    steps: vec![],
+                    max_runtime_ms: None,
+                    max_loop_iterations: None,
+                };
+                let path = self.dispatcher.macros_dir.join(format!("{id}.json"));
+                self.editor = Some(crate::editor::Editor::open(mac, path));
+            }
+            if ui.button("⟳ Reload").clicked() {
+                self.macro_list = MacroLibrary::load(&self.dispatcher.macros_dir);
+            }
+            let running = self.dispatcher.executions.count();
+            if ui
+                .add_enabled(running > 0, egui::Button::new(format!("⏹ Stop all ({running} running)")))
+                .clicked()
+            {
+                self.dispatcher.emergency_stop();
+            }
+            if running > 0 {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        });
+        ui.separator();
+        let mut open: Option<String> = None;
+        let mut delete: Option<String> = None;
+        egui::Grid::new("macro_list").num_columns(6).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+            for m in self.macro_list.iter_sorted() {
+                if ui.button("✏ Edit").clicked() {
+                    open = Some(m.id.clone());
+                }
+                if ui.button("▶ Run").clicked() {
+                    self.dispatcher.run_macro_by_id(&m.id);
+                }
+                ui.strong(&m.name);
+                ui.monospace(&m.id);
+                ui.weak(format!("{} steps", m.steps.len()));
+                if ui.button("🗑").on_hover_text("Delete (renames to .deleted)").clicked() {
+                    delete = Some(m.id.clone());
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(id) = open {
+            if let Some(mac) = self.macro_list.get(&id).cloned() {
+                let path = self.dispatcher.macros_dir.join(format!("{id}.json"));
+                self.editor = Some(crate::editor::Editor::open(mac, path));
+            }
+        }
+        if let Some(id) = delete {
+            let path = self.dispatcher.macros_dir.join(format!("{id}.json"));
+            if let Err(e) = std::fs::rename(&path, path.with_extension("json.deleted")) {
+                tracing::error!(error = %e, "failed to delete macro");
+            }
+            self.macro_list = MacroLibrary::load(&self.dispatcher.macros_dir);
+        }
+    }
+
     fn tab_ui(&mut self, ui: &mut egui::Ui) {
         match self.tab {
             Tab::Bindings => self.bindings_tab(ui),
-            Tab::Macros => {
-                ui.label("Macros are hand-written JSON files in keyforge_data/macros/ until the visual editor arrives (M7).");
-                ui.horizontal(|ui| {
-                    if ui.button("⟳ Reload").clicked() {
-                        self.macro_list = MacroLibrary::load(&self.dispatcher.macros_dir);
-                    }
-                    let running = self.dispatcher.executions.count();
-                    if ui.add_enabled(running > 0, egui::Button::new(format!("⏹ Stop all ({running} running)"))).clicked() {
-                        self.dispatcher.emergency_stop();
-                    }
-                    if running > 0 {
-                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-                    }
-                });
-                ui.separator();
-                egui::Grid::new("macro_list").num_columns(4).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
-                    for m in self.macro_list.iter_sorted() {
-                        if ui.button("▶ Run").clicked() {
-                            self.dispatcher.run_macro_by_id(&m.id);
-                        }
-                        ui.strong(&m.name);
-                        ui.monospace(&m.id);
-                        ui.weak(format!("{} steps", m.steps.len()));
-                        ui.end_row();
-                    }
-                });
-            }
+            Tab::Macros => self.macros_tab(ui),
             Tab::Devices => {
                 // live view, refreshed every 2s — this is the debugging aid for
                 // writing device conditions: names/IDs shown are what matchers see

@@ -83,25 +83,41 @@ fn default_wait_timeout_ms() -> u64 {
     10_000
 }
 
+/// A step plus its editor placement flags. `disabled` blocks are skipped by
+/// the executor and rendered dimmed — invaluable for debugging.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Block {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+    #[serde(flatten)]
+    pub step: Step,
+}
+
+impl From<Step> for Block {
+    fn from(step: Step) -> Block {
+        Block { disabled: false, step }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
     If {
         condition: Condition,
         #[serde(default)]
-        then: Vec<Step>,
+        then: Vec<Block>,
         #[serde(default, rename = "else")]
-        else_steps: Vec<Step>,
+        else_steps: Vec<Block>,
     },
     Loop {
         times: Param<i64>,
         #[serde(default)]
-        steps: Vec<Step>,
+        steps: Vec<Block>,
     },
     While {
         condition: Condition,
         #[serde(default)]
-        steps: Vec<Step>,
+        steps: Vec<Block>,
     },
     Break,
     Wait {
@@ -114,7 +130,7 @@ pub enum Step {
         #[serde(default = "default_wait_timeout_ms")]
         timeout_ms: u64,
         #[serde(default)]
-        on_timeout: Vec<Step>,
+        on_timeout: Vec<Block>,
     },
     SetVariable {
         name: String,
@@ -246,6 +262,34 @@ pub enum Step {
         delta: Param<i64>,
     },
     MuteToggle,
+    /// OK continues, Cancel stops the macro — cheap safety valve.
+    ConfirmDialog {
+        message: Param<String>,
+    },
+}
+
+impl Step {
+    /// (slot label, children) for container steps — the editor and validator
+    /// walk nesting through this instead of matching variants themselves.
+    pub fn child_lists(&self) -> Vec<(&'static str, &Vec<Block>)> {
+        match self {
+            Step::If { then, else_steps, .. } => vec![("then", then), ("else", else_steps)],
+            Step::Loop { steps, .. } => vec![("do", steps)],
+            Step::While { steps, .. } => vec![("do", steps)],
+            Step::WaitUntil { on_timeout, .. } => vec![("on timeout", on_timeout)],
+            _ => vec![],
+        }
+    }
+
+    pub fn child_lists_mut(&mut self) -> Vec<(&'static str, &mut Vec<Block>)> {
+        match self {
+            Step::If { then, else_steps, .. } => vec![("then", then), ("else", else_steps)],
+            Step::Loop { steps, .. } => vec![("do", steps)],
+            Step::While { steps, .. } => vec![("do", steps)],
+            Step::WaitUntil { on_timeout, .. } => vec![("on timeout", on_timeout)],
+            _ => vec![],
+        }
+    }
 }
 
 fn param_summary<T: std::fmt::Display>(p: &Param<T>) -> String {
@@ -343,6 +387,7 @@ impl Step {
             ),
             Step::AdjustVolume { delta } => format!("Volume {}", param_summary(delta)),
             Step::MuteToggle => "Mute toggle".into(),
+            Step::ConfirmDialog { message } => format!("Confirm: {}", param_summary(message)),
         }
     }
 }
@@ -360,7 +405,7 @@ pub struct Macro {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub steps: Vec<Step>,
+    pub steps: Vec<Block>,
     /// Runaway-guard overrides; defaults in exec.rs apply when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runtime_ms: Option<u64>,
@@ -435,14 +480,16 @@ pub fn seed_example(dir: &Path) {
                       the visual editor arrives in a later milestone."
             .into(),
         steps: vec![
-            Step::SetVariable { name: "n".into(), value: serde_json::json!(0).into() },
+            Step::SetVariable { name: "n".into(), value: serde_json::json!(0).into() }.into(),
             Step::Loop {
                 times: 3.into(),
                 steps: vec![
-                    Step::SetVariable { name: "n".into(), value: Param::Expr { expr: "n + 1".into() } },
-                    Step::Wait { ms: 250.into() },
+                    Step::SetVariable { name: "n".into(), value: Param::Expr { expr: "n + 1".into() } }
+                        .into(),
+                    Step::Wait { ms: 250.into() }.into(),
                 ],
-            },
+            }
+            .into(),
             Step::If {
                 condition: Condition::VariableComparison {
                     variable: "n".into(),
@@ -452,9 +499,11 @@ pub fn seed_example(dir: &Path) {
                 then: vec![Step::SetVariable {
                     name: "result".into(),
                     value: serde_json::json!("counted to three!").into(),
-                }],
-                else_steps: vec![Step::StopMacro],
-            },
+                }
+                .into()],
+                else_steps: vec![Step::StopMacro.into()],
+            }
+            .into(),
         ],
         max_runtime_ms: None,
         max_loop_iterations: None,
@@ -490,7 +539,7 @@ mod tests {
                     condition: Condition::All {
                         conditions: vec![Condition::Expr { expr: "true".into() }],
                     },
-                    then: vec![Step::Break],
+                    then: vec![Block { disabled: true, step: Step::Break }],
                     else_steps: vec![],
                 },
                 Step::WaitUntil {
@@ -501,9 +550,12 @@ mod tests {
                     },
                     poll_ms: 50,
                     timeout_ms: 1000,
-                    on_timeout: vec![Step::StopMacro],
+                    on_timeout: vec![Step::StopMacro.into()],
                 },
-            ],
+            ]
+            .into_iter()
+            .map(Block::from)
+            .collect(),
             max_runtime_ms: Some(1000),
             max_loop_iterations: None,
         };
@@ -511,6 +563,10 @@ mod tests {
         assert_eq!(serde_json::from_str::<Macro>(&json).unwrap(), m);
         assert!(json.contains("\"type\": \"wait_until\""));
         assert!(json.contains("\"else\""));
+        // disabled flag flattens next to the step's own fields
+        assert!(json.contains("\"disabled\": true"));
+        // enabled blocks don't serialize the flag at all (clean diffs)
+        assert_eq!(json.matches("disabled").count(), 1);
     }
 
     #[test]

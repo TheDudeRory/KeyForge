@@ -152,6 +152,20 @@ pub fn pixel_at(_x: i32, _y: i32) -> Result<(u8, u8, u8), String> {
     Err("pixel capture not implemented on this platform yet".into())
 }
 
+#[cfg(windows)]
+pub fn cursor_pos() -> Result<(i32, i32), String> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p).map_err(|e| e.to_string())? };
+    Ok((p.x, p.y))
+}
+
+#[cfg(not(windows))]
+pub fn cursor_pos() -> Result<(i32, i32), String> {
+    Err("cursor position not implemented on this platform yet".into())
+}
+
 // ---------------------------------------------------------------------- time
 
 fn parse_hhmm(s: &str) -> Result<chrono::NaiveTime, String> {

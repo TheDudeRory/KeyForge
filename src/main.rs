@@ -3,7 +3,9 @@
 mod app;
 mod audio;
 mod bindings;
+mod editor;
 mod exec;
+mod forms;
 mod hotkey;
 mod input;
 mod keys;
