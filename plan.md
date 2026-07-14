@@ -14,7 +14,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
 
 ## Milestones
 
-- [ ] **M1 Skeleton** — cargo project; eframe app with 5 tabs (Bindings/Macros/Devices/Log/Settings, empty);
+- [x] **M1 Skeleton** — cargo project; eframe app with 5 tabs (Bindings/Macros/Devices/Log/Settings, empty);
       exe-relative `keyforge_data/` bootstrap + writability check + error dialog; `settings.json` load/save;
       tracing → rotating logs in `keyforge_data/logs/`; single-instance lock (std file lock);
       tray icon (Windows; Linux stub) with open/quit, close-to-tray.
