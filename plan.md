@@ -18,7 +18,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
       exe-relative `keyforge_data/` bootstrap + writability check + error dialog; `settings.json` load/save;
       tracing → rotating logs in `keyforge_data/logs/`; single-instance lock (std file lock);
       tray icon (Windows; Linux stub) with open/quit, close-to-tray.
-- [ ] **M2 Hotkeys** — `HotkeyBackend` trait over `global-hotkey` on a dedicated thread; runtime (un)register;
+- [x] **M2 Hotkeys** — `HotkeyBackend` trait over `global-hotkey` on a dedicated thread; runtime (un)register;
       hardcoded binding → Launch Program; Bindings tab table + key-combo capture widget; emergency-stop hotkey (logs).
 - [ ] **M3 Macro engine** — Step/Macro serde model; tokio recursive async executor + cancellation;
       variables + Rhai expressions; control-flow steps; runaway guards (60s / 10k iterations); execution logging.

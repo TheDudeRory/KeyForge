@@ -44,31 +44,12 @@ fn migrate(mut s: Settings) -> Settings {
 }
 
 impl Settings {
-    /// Loads settings, creating the file with defaults if missing. A corrupt
-    /// file is preserved as `settings.json.bak` instead of being overwritten.
     pub fn load_or_create(path: &Path) -> Settings {
-        let settings = match std::fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str::<Settings>(&text) {
-                Ok(s) => migrate(s),
-                Err(e) => {
-                    let bak = path.with_extension("json.bak");
-                    tracing::error!(error = %e, backup = %bak.display(), "settings.json is corrupt, using defaults");
-                    let _ = std::fs::rename(path, &bak);
-                    Settings::default()
-                }
-            },
-            Err(_) => Settings::default(),
-        };
-        settings.save(path);
-        settings
+        crate::persist::load_or_create(path, migrate)
     }
 
     pub fn save(&self, path: &Path) {
-        // Struct field order gives stable key ordering; pretty-printed for clean diffs.
-        let json = serde_json::to_string_pretty(self).expect("settings always serialize");
-        if let Err(e) = std::fs::write(path, json) {
-            tracing::error!(error = %e, path = %path.display(), "failed to save settings");
-        }
+        crate::persist::save(path, self);
     }
 }
 

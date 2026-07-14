@@ -1,6 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bindings;
+mod hotkey;
+mod keys;
+mod persist;
 mod settings;
 mod tray;
 

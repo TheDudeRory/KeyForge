@@ -1,7 +1,10 @@
+use crate::bindings::{Action, Binding, Profile};
+use crate::hotkey::{GlobalHotkeyBackend, HotkeyEngine, TargetMap};
 use crate::settings::{Settings, Theme};
 use crate::tray::{Tray, TrayEvent};
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -23,6 +26,8 @@ const TABS: [(Tab, &str); 5] = [
 pub struct KeyForgeApp {
     data_dir: PathBuf,
     settings: Settings,
+    profile: Profile,
+    engine: Result<HotkeyEngine, String>,
     tab: Tab,
     tray: Tray,
     allow_close: bool,
@@ -42,18 +47,37 @@ impl KeyForgeApp {
         let tray = Tray::new(cc.egui_ctx.clone());
         // Only start hidden when a tray icon exists to get the window back.
         let hide_pending = settings.start_minimized && tray.active();
-        KeyForgeApp {
+
+        let profile = Profile::load_or_create(&data_dir.join("profiles").join("default.json"));
+        let targets: TargetMap = Default::default();
+        let engine = GlobalHotkeyBackend::new(Arc::clone(&targets))
+            .map(|backend| HotkeyEngine::new(Box::new(backend), targets));
+        if let Err(e) = &engine {
+            tracing::error!(error = e, "hotkey backend unavailable");
+        }
+
+        let mut app = KeyForgeApp {
             data_dir,
             settings,
+            profile,
+            engine,
             tab: Tab::Bindings,
             tray,
             allow_close: false,
             hide_pending,
-        }
+        };
+        app.resync_hotkeys();
+        app
     }
 
     fn settings_path(&self) -> PathBuf {
         self.data_dir.join("settings.json")
+    }
+
+    fn resync_hotkeys(&mut self) {
+        if let Ok(engine) = &mut self.engine {
+            engine.sync(&self.settings.emergency_stop_hotkey, &self.profile);
+        }
     }
 
     fn handle_tray(&mut self, ctx: &egui::Context) {
@@ -71,11 +95,81 @@ impl KeyForgeApp {
         }
     }
 
+    fn bindings_tab(&mut self, ui: &mut egui::Ui) {
+        if let Err(e) = &self.engine {
+            ui.colored_label(ui.visuals().error_fg_color, format!("Hotkey system unavailable: {e}"));
+            ui.separator();
+        }
+
+        let mut dirty = false;
+        let mut remove: Option<usize> = None;
+        egui::Grid::new("bindings").num_columns(6).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.strong("On");
+            ui.strong("Hotkey");
+            ui.strong("Program");
+            ui.strong("Arguments");
+            ui.strong("");
+            ui.strong("Status");
+            ui.end_row();
+
+            for (i, b) in self.profile.bindings.iter_mut().enumerate() {
+                dirty |= ui.checkbox(&mut b.enabled, "").changed();
+                dirty |= crate::keys::hotkey_capture(ui, i, &mut b.hotkey);
+                let Action::LaunchProgram { path, args } = &mut b.action;
+                dirty |= ui.add(egui::TextEdit::singleline(path).hint_text("program path")).changed();
+                let mut joined = args.join(" ");
+                let args_edit = ui.add(
+                    egui::TextEdit::singleline(&mut joined).hint_text("args, space-separated"),
+                );
+                if args_edit.changed() {
+                    // ponytail: whitespace split — args containing spaces need a
+                    // JSON edit until the real param forms arrive in M7.
+                    *args = joined.split_whitespace().map(String::from).collect();
+                    dirty = true;
+                }
+                if ui.button("✕").clicked() {
+                    remove = Some(i);
+                }
+                let error = match &self.engine {
+                    Ok(engine) => engine.error_for(&b.hotkey).cloned(),
+                    Err(_) => None,
+                };
+                if let Some(err) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                } else if !b.enabled {
+                    ui.weak("off");
+                } else if b.hotkey.is_empty() {
+                    ui.weak("no hotkey set");
+                } else {
+                    ui.weak("active");
+                }
+                ui.end_row();
+            }
+        });
+
+        if let Some(i) = remove {
+            self.profile.bindings.remove(i);
+            dirty = true;
+        }
+        ui.add_space(6.0);
+        if ui.button("＋ Add binding").clicked() {
+            self.profile.bindings.push(Binding {
+                hotkey: String::new(),
+                enabled: true,
+                action: Action::LaunchProgram { path: String::new(), args: vec![] },
+            });
+            dirty = true;
+        }
+
+        if dirty {
+            self.profile.save(&self.data_dir.join("profiles").join("default.json"));
+            self.resync_hotkeys();
+        }
+    }
+
     fn tab_ui(&mut self, ui: &mut egui::Ui) {
         match self.tab {
-            Tab::Bindings => {
-                ui.label("Hotkey bindings will appear here (Milestone 2).");
-            }
+            Tab::Bindings => self.bindings_tab(ui),
             Tab::Macros => {
                 ui.label("The macro library and editor will appear here (Milestones 3 & 7).");
             }
@@ -100,16 +194,22 @@ impl KeyForgeApp {
                         ui.selectable_value(&mut self.settings.theme, Theme::Light, "Light");
                     });
                 ui.separator();
-                ui.label(format!(
-                    "Emergency stop hotkey: {} (configurable once hotkeys land in Milestone 2)",
-                    self.settings.emergency_stop_hotkey
-                ));
+                ui.horizontal(|ui| {
+                    ui.label("Emergency stop hotkey:");
+                    crate::keys::hotkey_capture(ui, "emergency_stop", &mut self.settings.emergency_stop_hotkey);
+                });
+                if let Ok(engine) = &self.engine {
+                    if let Some(err) = engine.error_for(&self.settings.emergency_stop_hotkey) {
+                        ui.colored_label(ui.visuals().error_fg_color, err);
+                    }
+                }
                 if !self.tray.active() {
                     ui.label("No tray icon on this platform yet — the close button quits.");
                 }
                 if self.settings != before {
                     apply_theme(ui.ctx(), self.settings.theme);
                     self.settings.save(&self.settings_path());
+                    self.resync_hotkeys();
                 }
             }
         }
