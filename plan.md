@@ -28,7 +28,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
 - [x] **M5 Window management** — `WindowManager` trait; `windows` crate impl (SetForegroundWindow workarounds,
       elevated-window detection) + `x11rb`/EWMH impl; all window steps + window/process conditions;
       WindowSelector matching w/ unit tests vs fake backend.
-- [ ] **M6 Devices & system** — audio enumerate/switch (IPolicyConfig / `pactl`), USB Device-Is-Connected,
+- [x] **M6 Devices & system** — audio enumerate/switch (IPolicyConfig / `pactl`), USB Device-Is-Connected,
       clipboard, notifications, shell command w/ output capture, remaining conditions (pixel color, file, time).
 - [ ] **M7 Visual editor** — block palette, nested block list, drag-reorder, cut/copy/paste/duplicate/disable,
       param widgets (key capture, window picker, position picker, device dropdowns), undo/redo, save validation.

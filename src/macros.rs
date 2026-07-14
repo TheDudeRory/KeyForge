@@ -44,7 +44,18 @@ pub enum Condition {
     /// Regex over all visible window titles.
     WindowTitleMatches { pattern: String },
     ProcessRunning { name: String },
-    // device/pixel/file/time conditions land with M6.
+    /// "VID:PID" hex or name substring.
+    DeviceConnected { device: String },
+    AudioDeviceExists { name: String },
+    FileExists { path: String },
+    DirectoryExists { path: String },
+    /// color "#RRGGBB"; per-channel tolerance.
+    PixelColorAt { x: i32, y: i32, color: String, #[serde(default)] tolerance: u8 },
+    ClipboardContains { pattern: String, #[serde(default)] regex: bool },
+    /// "HH:MM"–"HH:MM", wraps overnight.
+    TimeIsBetween { start: String, end: String },
+    /// ["mon", "tue", ...] — three-letter prefixes, case-insensitive.
+    DayOfWeekIs { days: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -200,6 +211,41 @@ pub enum Step {
         window: WindowSelector,
         percent: Param<i64>,
     },
+    SetClipboard {
+        text: Param<String>,
+    },
+    ClipboardToVariable {
+        variable: String,
+    },
+    ShowNotification {
+        #[serde(default)]
+        title: String,
+        message: Param<String>,
+    },
+    PlaySound {
+        path: Param<String>,
+    },
+    /// File, folder, or URL via the OS default handler.
+    OpenPath {
+        path: Param<String>,
+    },
+    /// Captures into variables: shell_stdout, shell_stderr, shell_exit_code.
+    RunShellCommand {
+        command: Param<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    /// Fuzzy name match against live devices (IDs change; names mostly don't).
+    SetDefaultAudioDevice {
+        name: Param<String>,
+        #[serde(default)]
+        input: bool,
+    },
+    /// Master volume by signed percent.
+    AdjustVolume {
+        delta: Param<i64>,
+    },
+    MuteToggle,
 }
 
 fn param_summary<T: std::fmt::Display>(p: &Param<T>) -> String {
@@ -276,6 +322,27 @@ impl Step {
                 crate::window::describe(window),
                 param_summary(percent)
             ),
+            Step::SetClipboard { text } => {
+                let t = param_summary(text);
+                let short: String = t.chars().take(24).collect();
+                format!("Set clipboard {short:?}{}", if t.chars().count() > 24 { "…" } else { "" })
+            }
+            Step::ClipboardToVariable { variable } => format!("Clipboard → {variable}"),
+            Step::ShowNotification { title, .. } => format!("Notify {title:?}"),
+            Step::PlaySound { path } => format!("Play {}", param_summary(path)),
+            Step::OpenPath { path } => format!("Open {}", param_summary(path)),
+            Step::RunShellCommand { command, .. } => {
+                let c = param_summary(command);
+                let short: String = c.chars().take(32).collect();
+                format!("Shell: {short}{}", if c.chars().count() > 32 { "…" } else { "" })
+            }
+            Step::SetDefaultAudioDevice { name, input } => format!(
+                "Default audio {} → {}",
+                if *input { "input" } else { "output" },
+                param_summary(name)
+            ),
+            Step::AdjustVolume { delta } => format!("Volume {}", param_summary(delta)),
+            Step::MuteToggle => "Mute toggle".into(),
         }
     }
 }

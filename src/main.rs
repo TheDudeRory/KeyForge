@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod audio;
 mod bindings;
 mod exec;
 mod hotkey;
@@ -9,7 +10,9 @@ mod keys;
 mod macros;
 mod persist;
 mod settings;
+mod sys;
 mod tray;
+mod usb;
 mod window;
 
 use std::fs::{self, File, TryLockError};
@@ -93,11 +96,35 @@ fn main() -> eframe::Result {
     // Outlives run_native; macro executions run here so they never block the UI.
     let runtime = tokio::runtime::Runtime::new()
         .unwrap_or_else(|e| fatal(&format!("Cannot start async runtime: {e}")));
+    let services = std::sync::Arc::new(exec::Services {
+        inputs: input::Inputs::new(),
+        wm: Box::new(window::NativeWindowManager),
+        audio: Box::new(audio::NativeAudioManager),
+        usb: Box::new(usb::NativeUsbEnumerator),
+    });
+    // Off the main thread: COM init here would poison winit's OLE STA apartment.
+    let snapshot = std::sync::Arc::clone(&services);
+    std::thread::spawn(move || {
+        match snapshot.audio.list() {
+            Ok(list) => tracing::info!(
+                devices = list.len(),
+                names = ?list
+                    .iter()
+                    .map(|d| format!("{}{}", d.name, if d.default { " [default]" } else { "" }))
+                    .collect::<Vec<_>>(),
+                "audio devices"
+            ),
+            Err(e) => tracing::error!(error = e, "audio enumeration failed"),
+        }
+        match snapshot.usb.list() {
+            Ok(list) => tracing::info!(devices = list.len(), "usb devices enumerated"),
+            Err(e) => tracing::error!(error = e, "usb enumeration failed"),
+        }
+    });
     let dispatcher = exec::Dispatcher {
         handle: runtime.handle().clone(),
         executions: std::sync::Arc::default(),
-        inputs: std::sync::Arc::new(input::Inputs::new()),
-        wm: std::sync::Arc::new(window::NativeWindowManager),
+        services,
         macros_dir: data.join("macros"),
     };
 

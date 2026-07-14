@@ -368,17 +368,17 @@ mod win_impl {
         }
 
         fn minimize(&self, id: u64) -> Result<(), String> {
-            unsafe { ShowWindow(hwnd(id), SW_MINIMIZE) };
+            let _ = unsafe { ShowWindow(hwnd(id), SW_MINIMIZE) };
             Ok(())
         }
 
         fn maximize(&self, id: u64) -> Result<(), String> {
-            unsafe { ShowWindow(hwnd(id), SW_MAXIMIZE) };
+            let _ = unsafe { ShowWindow(hwnd(id), SW_MAXIMIZE) };
             Ok(())
         }
 
         fn restore(&self, id: u64) -> Result<(), String> {
-            unsafe { ShowWindow(hwnd(id), SW_RESTORE) };
+            let _ = unsafe { ShowWindow(hwnd(id), SW_RESTORE) };
             Ok(())
         }
 
@@ -475,13 +475,13 @@ mod stub_impl {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// Fake backend: fixed window list, records mutations as strings.
     pub struct FakeWm {
         pub windows: Vec<WindowInfo>,
         pub monitors: Vec<MonitorInfo>,
-        pub calls: Mutex<Vec<String>>,
+        pub calls: Arc<Mutex<Vec<String>>>,
     }
 
     pub fn win(id: u64, title: &str, class: &str, process: &str, focused: bool) -> WindowInfo {
@@ -503,7 +503,7 @@ pub mod test_support {
                     win(2, "KeyForge", "glfw", "keyforge.exe", true),
                 ],
                 monitors: vec![MonitorInfo { x: 0, y: 0, w: 1920, h: 1080 }],
-                calls: Mutex::default(),
+                calls: Arc::default(),
             }
         }
     }

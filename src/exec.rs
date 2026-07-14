@@ -1,6 +1,17 @@
+use crate::audio::AudioDeviceManager;
 use crate::input::Inputs;
 use crate::macros::{CmpOp, Condition, Macro, MacroLibrary, Param, Step};
+use crate::usb::UsbEnumerator;
 use crate::window::{self, WindowInfo, WindowManager, WindowSelector};
+
+/// The OS capabilities macros run against — one bundle instead of a parameter
+/// per subsystem. Real impls in main, fakes in tests.
+pub struct Services {
+    pub inputs: Inputs,
+    pub wm: Box<dyn WindowManager>,
+    pub audio: Box<dyn AudioDeviceManager>,
+    pub usb: Box<dyn UsbEnumerator>,
+}
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -143,13 +154,13 @@ fn compare(op: CmpOp, left: &Value, right: &Value) -> Result<bool, String> {
 pub fn eval_condition(
     cond: &Condition,
     vars: &HashMap<String, Value>,
-    wm: &dyn WindowManager,
+    services: &Services,
 ) -> Result<bool, ExecError> {
-    let list = || wm.list_windows().map_err(ExecError::Window);
+    let list = || services.wm.list_windows().map_err(ExecError::Window);
     match cond {
         Condition::All { conditions } => {
             for c in conditions {
-                if !eval_condition(c, vars, wm)? {
+                if !eval_condition(c, vars, services)? {
                     return Ok(false);
                 }
             }
@@ -157,13 +168,13 @@ pub fn eval_condition(
         }
         Condition::Any { conditions } => {
             for c in conditions {
-                if eval_condition(c, vars, wm)? {
+                if eval_condition(c, vars, services)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        Condition::Not { condition } => Ok(!eval_condition(condition, vars, wm)?),
+        Condition::Not { condition } => Ok(!eval_condition(condition, vars, services)?),
         Condition::Expr { expr } => match eval_expr(expr, vars).map_err(ExecError::Eval)? {
             Value::Bool(b) => Ok(b),
             other => Err(ExecError::Eval(format!("condition must be boolean, got {other}: {expr}"))),
@@ -182,6 +193,39 @@ pub fn eval_condition(
             Ok(list()?.iter().any(|w| re.is_match(&w.title)))
         }
         Condition::ProcessRunning { name } => Ok(window::process_running(name)),
+        Condition::DeviceConnected { device } => {
+            let devices = services.usb.list().map_err(ExecError::Window)?;
+            Ok(crate::usb::any_connected(&devices, device))
+        }
+        Condition::AudioDeviceExists { name } => {
+            let devices = services.audio.list().map_err(ExecError::Window)?;
+            Ok(crate::audio::device_exists(name, &devices))
+        }
+        Condition::FileExists { path } => Ok(std::path::Path::new(path).is_file()),
+        Condition::DirectoryExists { path } => Ok(std::path::Path::new(path).is_dir()),
+        Condition::PixelColorAt { x, y, color, tolerance } => {
+            let want = crate::sys::parse_color(color).map_err(ExecError::Eval)?;
+            let got = crate::sys::pixel_at(*x, *y).map_err(ExecError::Eval)?;
+            Ok(crate::sys::color_close(got, want, *tolerance))
+        }
+        Condition::ClipboardContains { pattern, regex } => {
+            let text = crate::sys::clipboard_get().unwrap_or_default();
+            if *regex {
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| ExecError::Eval(format!("bad clipboard regex: {e}")))?;
+                Ok(re.is_match(&text))
+            } else {
+                Ok(text.to_lowercase().contains(&pattern.to_lowercase()))
+            }
+        }
+        Condition::TimeIsBetween { start, end } => {
+            crate::sys::time_between(chrono::Local::now().time(), start, end)
+                .map_err(ExecError::Eval)
+        }
+        Condition::DayOfWeekIs { days } => {
+            use chrono::Datelike;
+            Ok(crate::sys::day_matches(chrono::Local::now().weekday(), days))
+        }
     }
 }
 
@@ -189,8 +233,7 @@ pub fn eval_condition(
 
 struct ExecState<'a> {
     lib: &'a MacroLibrary,
-    inputs: &'a Inputs,
-    wm: &'a dyn WindowManager,
+    services: &'a Services,
     vars: HashMap<String, Value>,
     cancel: CancellationToken,
     deadline: Instant,
@@ -200,9 +243,13 @@ struct ExecState<'a> {
 }
 
 impl ExecState<'_> {
+    fn wm(&self) -> &dyn WindowManager {
+        self.services.wm.as_ref()
+    }
+
     /// Topmost window matching the selector, or a clear error.
     fn resolve_window(&self, sel: &WindowSelector) -> Result<WindowInfo, ExecError> {
-        let windows = self.wm.list_windows().map_err(ExecError::Window)?;
+        let windows = self.wm().list_windows().map_err(ExecError::Window)?;
         window::find_first(sel, &windows)
             .cloned()
             .ok_or_else(|| ExecError::Window(format!("no window matches {}", window::describe(sel))))
@@ -246,7 +293,7 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
             match step {
                 Step::If { condition, then, else_steps } => {
                     let branch =
-                        if eval_condition(condition, &st.vars, st.wm)? { then } else { else_steps };
+                        if eval_condition(condition, &st.vars, st.services)? { then } else { else_steps };
                     match run_steps(branch, st).await? {
                         Flow::Next => {}
                         other => return Ok(other),
@@ -264,7 +311,7 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     }
                 }
                 Step::While { condition, steps } => {
-                    while eval_condition(condition, &st.vars, st.wm)? {
+                    while eval_condition(condition, &st.vars, st.services)? {
                         st.check()?;
                         st.count_loop()?;
                         match run_steps(steps, st).await? {
@@ -283,7 +330,7 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                     let until = Instant::now() + Duration::from_millis(*timeout_ms);
                     loop {
                         st.check()?;
-                        if eval_condition(condition, &st.vars, st.wm)? {
+                        if eval_condition(condition, &st.vars, st.services)? {
                             break;
                         }
                         if Instant::now() >= until {
@@ -327,27 +374,27 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                 }
                 Step::SendKeystroke { keys } => {
                     let combo = eval_string(keys, &st.vars)?;
-                    st.inputs.send_combo(&combo).map_err(ExecError::Input)?;
+                    st.services.inputs.send_combo(&combo).map_err(ExecError::Input)?;
                 }
                 Step::TypeText { text, char_delay_ms } => {
                     let text = eval_string(text, &st.vars)?;
                     if *char_delay_ms == 0 {
-                        st.inputs.type_text(&text).map_err(ExecError::Input)?;
+                        st.services.inputs.type_text(&text).map_err(ExecError::Input)?;
                     } else {
                         // Per-char typing stays cancellable between characters.
                         for c in text.chars() {
-                            st.inputs.type_text(&c.to_string()).map_err(ExecError::Input)?;
+                            st.services.inputs.type_text(&c.to_string()).map_err(ExecError::Input)?;
                             st.sleep(Duration::from_millis(*char_delay_ms)).await?;
                         }
                     }
                 }
                 Step::HoldKey { key } => {
                     let key = eval_string(key, &st.vars)?;
-                    st.inputs.hold_key(&key).map_err(ExecError::Input)?;
+                    st.services.inputs.hold_key(&key).map_err(ExecError::Input)?;
                 }
                 Step::ReleaseKey { key } => {
                     let key = eval_string(key, &st.vars)?;
-                    st.inputs.release_key(&key).map_err(ExecError::Input)?;
+                    st.services.inputs.release_key(&key).map_err(ExecError::Input)?;
                 }
                 Step::MouseMove { x, y, relative, window } => {
                     let (mut x, mut y) = (eval_i64(x, &st.vars)? as i32, eval_i64(y, &st.vars)? as i32);
@@ -358,23 +405,23 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                         y += win.rect.1;
                         relative = false;
                     }
-                    st.inputs.mouse_move(x, y, relative).map_err(ExecError::Input)?;
+                    st.services.inputs.mouse_move(x, y, relative).map_err(ExecError::Input)?;
                 }
                 Step::MouseClick { button, double } => {
-                    st.inputs.click(*button, *double).map_err(ExecError::Input)?;
+                    st.services.inputs.click(*button, *double).map_err(ExecError::Input)?;
                 }
                 Step::MouseDrag { from_x, from_y, to_x, to_y, button } => {
                     let from = (eval_i64(from_x, &st.vars)? as i32, eval_i64(from_y, &st.vars)? as i32);
                     let to = (eval_i64(to_x, &st.vars)? as i32, eval_i64(to_y, &st.vars)? as i32);
-                    st.inputs.drag(from, to, *button).map_err(ExecError::Input)?;
+                    st.services.inputs.drag(from, to, *button).map_err(ExecError::Input)?;
                 }
                 Step::Scroll { direction, amount } => {
                     let amount = eval_i64(amount, &st.vars)?;
-                    st.inputs.scroll(*direction, amount as i32).map_err(ExecError::Input)?;
+                    st.services.inputs.scroll(*direction, amount as i32).map_err(ExecError::Input)?;
                 }
                 Step::FocusWindow { window } => {
                     let win = st.resolve_window(window)?;
-                    st.wm.focus(win.id).map_err(ExecError::Window)?;
+                    st.wm().focus(win.id).map_err(ExecError::Window)?;
                 }
                 Step::MoveResizeWindow { window, x, y, w, h } => {
                     let win = st.resolve_window(window)?;
@@ -386,38 +433,38 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                                 .map_err(ExecError::Eval),
                         }
                     };
-                    let monitors = st.wm.monitors().map_err(ExecError::Window)?;
+                    let monitors = st.wm().monitors().map_err(ExecError::Window)?;
                     let mon = window::monitor_for(win.rect, &monitors)
                         .ok_or_else(|| ExecError::Window("no monitors".into()))?;
                     let (x, y, w, h) =
                         window::resolve_rect(win.rect, &mon, dim(x)?, dim(y)?, dim(w)?, dim(h)?);
-                    st.wm.move_resize(win.id, x, y, w, h).map_err(ExecError::Window)?;
+                    st.wm().move_resize(win.id, x, y, w, h).map_err(ExecError::Window)?;
                 }
                 Step::MinimizeWindow { window } => {
                     let win = st.resolve_window(window)?;
-                    st.wm.minimize(win.id).map_err(ExecError::Window)?;
+                    st.wm().minimize(win.id).map_err(ExecError::Window)?;
                 }
                 Step::MaximizeWindow { window } => {
                     let win = st.resolve_window(window)?;
-                    st.wm.maximize(win.id).map_err(ExecError::Window)?;
+                    st.wm().maximize(win.id).map_err(ExecError::Window)?;
                 }
                 Step::RestoreWindow { window } => {
                     let win = st.resolve_window(window)?;
-                    st.wm.restore(win.id).map_err(ExecError::Window)?;
+                    st.wm().restore(win.id).map_err(ExecError::Window)?;
                 }
                 Step::CloseWindow { window } => {
                     let win = st.resolve_window(window)?;
-                    st.wm.close(win.id).map_err(ExecError::Window)?;
+                    st.wm().close(win.id).map_err(ExecError::Window)?;
                 }
                 Step::ToggleAlwaysOnTop { window } => {
                     let win = st.resolve_window(window)?;
-                    let on = st.wm.always_on_top(win.id).map_err(ExecError::Window)?;
-                    st.wm.set_always_on_top(win.id, !on).map_err(ExecError::Window)?;
+                    let on = st.wm().always_on_top(win.id).map_err(ExecError::Window)?;
+                    st.wm().set_always_on_top(win.id, !on).map_err(ExecError::Window)?;
                 }
                 Step::MoveWindowToMonitor { window, monitor } => {
                     let win = st.resolve_window(window)?;
                     let n = eval_i64(monitor, &st.vars)?;
-                    let monitors = st.wm.monitors().map_err(ExecError::Window)?;
+                    let monitors = st.wm().monitors().map_err(ExecError::Window)?;
                     let target = monitors.get((n - 1).max(0) as usize).ok_or_else(|| {
                         ExecError::Window(format!("monitor {n} of {} does not exist", monitors.len()))
                     })?;
@@ -428,14 +475,62 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                         win.rect.0 - current.x + target.x,
                         win.rect.1 - current.y + target.y,
                     );
-                    st.wm.move_resize(win.id, x, y, win.rect.2, win.rect.3)
+                    st.wm().move_resize(win.id, x, y, win.rect.2, win.rect.3)
                         .map_err(ExecError::Window)?;
                 }
                 Step::SetWindowTransparency { window, percent } => {
                     let win = st.resolve_window(window)?;
                     let pct = eval_i64(percent, &st.vars)?.clamp(0, 100);
                     let alpha = (pct * 255 / 100) as u8;
-                    st.wm.set_transparency(win.id, alpha).map_err(ExecError::Window)?;
+                    st.wm().set_transparency(win.id, alpha).map_err(ExecError::Window)?;
+                }
+                Step::SetClipboard { text } => {
+                    let text = eval_string(text, &st.vars)?;
+                    crate::sys::clipboard_set(&text).map_err(ExecError::Input)?;
+                }
+                Step::ClipboardToVariable { variable } => {
+                    let text = crate::sys::clipboard_get().map_err(ExecError::Input)?;
+                    st.vars.insert(variable.clone(), Value::String(text));
+                }
+                Step::ShowNotification { title, message } => {
+                    let message = eval_string(message, &st.vars)?;
+                    crate::sys::notify(title, &message).map_err(ExecError::Input)?;
+                }
+                Step::PlaySound { path } => {
+                    let path = eval_string(path, &st.vars)?;
+                    crate::sys::play_sound(&path).map_err(ExecError::Input)?;
+                }
+                Step::OpenPath { path } => {
+                    let path = eval_string(path, &st.vars)?;
+                    crate::sys::open_path(&path).map_err(ExecError::Input)?;
+                }
+                Step::RunShellCommand { command, timeout_ms } => {
+                    let command = eval_string(command, &st.vars)?;
+                    let timeout = timeout_ms.unwrap_or(crate::sys::DEFAULT_SHELL_TIMEOUT_MS);
+                    let out = crate::sys::run_shell(&command, timeout, &st.cancel)
+                        .await
+                        .map_err(ExecError::Input)?;
+                    tracing::debug!(exit_code = out.exit_code, "shell command finished");
+                    st.vars.insert("shell_stdout".into(), Value::String(out.stdout));
+                    st.vars.insert("shell_stderr".into(), Value::String(out.stderr));
+                    st.vars.insert("shell_exit_code".into(), out.exit_code.into());
+                }
+                Step::SetDefaultAudioDevice { name, input } => {
+                    let name = eval_string(name, &st.vars)?;
+                    let devices = st.services.audio.list().map_err(ExecError::Input)?;
+                    let device = crate::audio::match_device(&name, &devices, !input)
+                        .ok_or_else(|| ExecError::Input(format!("no audio device matches {name:?}")))?;
+                    tracing::info!(matched = %device.name, "setting default audio device");
+                    st.services.audio.set_default(&device.id).map_err(ExecError::Input)?;
+                }
+                Step::AdjustVolume { delta } => {
+                    let delta = eval_i64(delta, &st.vars)? as i32;
+                    let now = st.services.audio.adjust_master_volume(delta).map_err(ExecError::Input)?;
+                    tracing::debug!(volume = now, "master volume adjusted");
+                }
+                Step::MuteToggle => {
+                    let muted = st.services.audio.toggle_mute().map_err(ExecError::Input)?;
+                    tracing::debug!(muted, "mute toggled");
                 }
             }
         }
@@ -448,14 +543,12 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
 pub async fn execute_macro(
     mac: &Macro,
     lib: &MacroLibrary,
-    inputs: &Inputs,
-    wm: &dyn WindowManager,
+    services: &Services,
     cancel: CancellationToken,
 ) -> Result<Outcome, ExecError> {
     let mut st = ExecState {
         lib,
-        inputs,
-        wm,
+        services,
         vars: HashMap::new(),
         cancel,
         deadline: Instant::now()
@@ -517,8 +610,7 @@ impl Executions {
 pub struct Dispatcher {
     pub handle: tokio::runtime::Handle,
     pub executions: Arc<Executions>,
-    pub inputs: Arc<Inputs>,
-    pub wm: Arc<dyn WindowManager>,
+    pub services: Arc<Services>,
     pub macros_dir: PathBuf,
 }
 
@@ -542,23 +634,22 @@ impl Dispatcher {
     pub fn spawn_macro(&self, mac: Macro, lib: MacroLibrary) {
         let (run_id, token) = self.executions.register(&mac.name);
         let executions = Arc::clone(&self.executions);
-        let inputs = Arc::clone(&self.inputs);
-        let wm = Arc::clone(&self.wm);
+        let services = Arc::clone(&self.services);
         self.handle.spawn(async move {
             let started = Instant::now();
             tracing::info!(id = %mac.id, name = %mac.name, run_id, "macro started");
             let elapsed = move || started.elapsed().as_millis() as u64;
-            match execute_macro(&mac, &lib, &inputs, wm.as_ref(), token).await {
+            match execute_macro(&mac, &lib, &services, token).await {
                 Ok(outcome) => {
                     // A completed macro keeps deliberate holds; abnormal ends release.
                     tracing::info!(name = %mac.name, run_id, ?outcome, elapsed_ms = elapsed(), "macro finished")
                 }
                 Err(ExecError::Cancelled) => {
-                    inputs.release_all();
+                    services.inputs.release_all();
                     tracing::warn!(name = %mac.name, run_id, elapsed_ms = elapsed(), "macro cancelled")
                 }
                 Err(e) => {
-                    inputs.release_all();
+                    services.inputs.release_all();
                     tracing::error!(name = %mac.name, run_id, error = %e, elapsed_ms = elapsed(), "macro failed")
                 }
             }
@@ -568,7 +659,7 @@ impl Dispatcher {
 
     pub fn emergency_stop(&self) {
         let cancelled = self.executions.cancel_all();
-        let released = self.inputs.release_all();
+        let released = self.services.inputs.release_all();
         tracing::warn!(cancelled, released, "EMERGENCY STOP");
     }
 }
@@ -603,19 +694,85 @@ mod tests {
         Condition::VariableComparison { variable: name.into(), op: CmpOp::Eq, value: v }
     }
 
+    use crate::audio::AudioDevice;
+    use crate::usb::UsbDevice;
+
+    #[derive(Default)]
+    struct FakeAudio {
+        calls: Arc<Mutex<Vec<String>>>,
+        devices: Vec<AudioDevice>,
+    }
+
+    impl AudioDeviceManager for FakeAudio {
+        fn list(&self) -> Result<Vec<AudioDevice>, String> {
+            Ok(self.devices.clone())
+        }
+        fn set_default(&self, id: &str) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("set_default {id}"));
+            Ok(())
+        }
+        fn adjust_master_volume(&self, delta: i32) -> Result<i32, String> {
+            self.calls.lock().unwrap().push(format!("volume {delta:+}"));
+            Ok(50)
+        }
+        fn toggle_mute(&self) -> Result<bool, String> {
+            self.calls.lock().unwrap().push("mute".into());
+            Ok(true)
+        }
+    }
+
+    struct FakeUsb(Vec<UsbDevice>);
+
+    impl UsbEnumerator for FakeUsb {
+        fn list(&self) -> Result<Vec<UsbDevice>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct Handles {
+        input_events: Arc<Mutex<Vec<String>>>,
+        wm_calls: Arc<Mutex<Vec<String>>>,
+        audio_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn fake_services() -> (Services, Handles) {
+        let (sim, input_events) = crate::input::test_support::RecordingSim::new();
+        let wm = crate::window::test_support::FakeWm::default();
+        let wm_calls = Arc::clone(&wm.calls);
+        let audio = FakeAudio {
+            devices: vec![
+                AudioDevice { id: "spk-id".into(), name: "Speakers (Realtek)".into(), output: true, default: true },
+                AudioDevice { id: "hp-id".into(), name: "Headphones (USB)".into(), output: true, default: false },
+                AudioDevice { id: "mic-id".into(), name: "Microphone (USB)".into(), output: false, default: true },
+            ],
+            ..Default::default()
+        };
+        let audio_calls = Arc::clone(&audio.calls);
+        let usb = FakeUsb(vec![UsbDevice {
+            vid: 0x046D,
+            pid: 0xC52B,
+            name: "Logitech USB Receiver".into(),
+            instance_id: r"USB\VID_046D&PID_C52B\6".into(),
+        }]);
+        let services = Services {
+            inputs: Inputs::with_backend(sim),
+            wm: Box::new(wm),
+            audio: Box::new(audio),
+            usb: Box::new(usb),
+        };
+        (services, Handles { input_events, wm_calls, audio_calls })
+    }
+
     /// Run steps against an empty library, returning (flow/error, vars).
     async fn run(m: Macro) -> (Result<Outcome, ExecError>, HashMap<String, Value>) {
         run_in_lib(m, MacroLibrary::default()).await
     }
 
     async fn run_in_lib(m: Macro, lib: MacroLibrary) -> (Result<Outcome, ExecError>, HashMap<String, Value>) {
-        let (sim, _) = crate::input::test_support::RecordingSim::new();
-        let inputs = Inputs::with_backend(sim);
-        let wm = crate::window::test_support::FakeWm::default();
+        let (services, _) = fake_services();
         let mut st = ExecState {
             lib: &lib,
-            inputs: &inputs,
-            wm: &wm,
+            services: &services,
             vars: HashMap::new(),
             cancel: CancellationToken::new(),
             deadline: Instant::now() + Duration::from_millis(m.max_runtime_ms.unwrap_or(DEFAULT_MAX_RUNTIME_MS)),
@@ -708,19 +865,17 @@ mod tests {
     async fn cancellation() {
         let m = mac("t", vec![Step::Wait { ms: Param::Literal(60_000) }]);
         let lib = MacroLibrary::default();
-        let (sim, _) = crate::input::test_support::RecordingSim::new();
-        let inputs = Inputs::with_backend(sim);
-        let wm = crate::window::test_support::FakeWm::default();
+        let (services, _) = fake_services();
         let token = CancellationToken::new();
         token.cancel();
-        let err = execute_macro(&m, &lib, &inputs, &wm, token).await.unwrap_err();
+        let err = execute_macro(&m, &lib, &services, token).await.unwrap_err();
         assert_eq!(err, ExecError::Cancelled);
     }
 
     #[tokio::test(start_paused = true)]
     async fn input_steps_drive_simulator() {
-        let (sim, events) = crate::input::test_support::RecordingSim::new();
-        let inputs = Inputs::with_backend(sim);
+        let (services, handles) = fake_services();
+        let events = handles.input_events;
         let m = mac("t", vec![
             set("combo", json!("Ctrl+C")),
             Step::SendKeystroke { keys: Param::Expr { expr: "combo".into() } },
@@ -730,8 +885,7 @@ mod tests {
             Step::Scroll { direction: crate::macros::ScrollDirection::Down, amount: Param::Literal(3) },
         ]);
         let lib = MacroLibrary::default();
-        let wm = crate::window::test_support::FakeWm::default();
-        let out = execute_macro(&m, &lib, &inputs, &wm, CancellationToken::new()).await;
+        let out = execute_macro(&m, &lib, &services, CancellationToken::new()).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
         assert_eq!(
             *events.lock().unwrap(),
@@ -751,25 +905,23 @@ mod tests {
 
     #[tokio::test]
     async fn abnormal_end_release_path_reports_held() {
-        let (sim, _) = crate::input::test_support::RecordingSim::new();
-        let inputs = Inputs::with_backend(sim);
+        let (services, _) = fake_services();
         let m = mac("t", vec![
             Step::HoldKey { key: Param::Literal("Shift".into()) },
             Step::Wait { ms: Param::Literal(60_000) },
         ]);
         let lib = MacroLibrary::default();
-        let wm = crate::window::test_support::FakeWm::default();
         let token = CancellationToken::new();
         let cancel = token.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             cancel.cancel();
         });
-        let err = execute_macro(&m, &lib, &inputs, &wm, token).await.unwrap_err();
+        let err = execute_macro(&m, &lib, &services, token).await.unwrap_err();
         task.await.unwrap();
         assert_eq!(err, ExecError::Cancelled);
         // what the dispatcher does on abnormal end:
-        assert_eq!(inputs.release_all(), 1);
+        assert_eq!(services.inputs.release_all(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -841,7 +993,7 @@ mod tests {
 
     #[test]
     fn condition_groups() {
-        let wm = crate::window::test_support::FakeWm::default();
+        let (wm, _) = fake_services();
         let vars = HashMap::from([("n".to_string(), json!(5))]);
         let t = Condition::Expr { expr: "n == 5".into() };
         let f = Condition::Expr { expr: "n == 6".into() };
@@ -861,7 +1013,7 @@ mod tests {
     #[test]
     fn window_conditions_against_fake() {
         use crate::window::{TitleMatch, WindowSelector};
-        let wm = crate::window::test_support::FakeWm::default();
+        let (wm, _) = fake_services();
         let vars = HashMap::new();
         let exists = Condition::WindowExists {
             window: WindowSelector::Title { mode: TitleMatch::Contains, value: "notepad".into() },
@@ -881,10 +1033,8 @@ mod tests {
 
     #[tokio::test]
     async fn window_steps_drive_manager() {
-        use crate::window::{test_support::FakeWm, WindowSelector};
-        let (sim, _) = crate::input::test_support::RecordingSim::new();
-        let inputs = Inputs::with_backend(sim);
-        let wm = FakeWm::default();
+        use crate::window::WindowSelector;
+        let (services, handles) = fake_services();
         let sel = WindowSelector::Process { name: "notepad".into() };
         let m = mac("t", vec![
             Step::FocusWindow { window: sel.clone() },
@@ -900,10 +1050,10 @@ mod tests {
             Step::CloseWindow { window: sel.clone() },
         ]);
         let lib = MacroLibrary::default();
-        let out = execute_macro(&m, &lib, &inputs, &wm, CancellationToken::new()).await;
+        let out = execute_macro(&m, &lib, &services, CancellationToken::new()).await;
         assert_eq!(out.unwrap(), Outcome::Completed);
         assert_eq!(
-            *wm.calls.lock().unwrap(),
+            *handles.wm_calls.lock().unwrap(),
             vec![
                 "focus 1",
                 // monitor 1920x1080: x=10% → 192, y=0, w=50% → 960, h kept (200)
@@ -917,14 +1067,92 @@ mod tests {
 
     #[tokio::test]
     async fn missing_window_is_clear_error() {
-        let (sim, _) = crate::input::test_support::RecordingSim::new();
-        let inputs = Inputs::with_backend(sim);
-        let wm = crate::window::test_support::FakeWm::default();
+        let (services, _) = fake_services();
         let m = mac("t", vec![Step::FocusWindow {
             window: crate::window::WindowSelector::Process { name: "ghost".into() },
         }]);
         let lib = MacroLibrary::default();
-        let err = execute_macro(&m, &lib, &inputs, &wm, CancellationToken::new()).await.unwrap_err();
+        let err = execute_macro(&m, &lib, &services, CancellationToken::new()).await.unwrap_err();
         assert!(matches!(err, ExecError::Window(msg) if msg.contains("ghost")));
+    }
+
+    #[tokio::test]
+    async fn audio_and_device_steps() {
+        let (services, handles) = fake_services();
+        let m = mac("t", vec![
+            Step::SetDefaultAudioDevice { name: Param::Literal("headphones".into()), input: false },
+            Step::AdjustVolume { delta: Param::Literal(-10) },
+            Step::MuteToggle,
+            Step::If {
+                condition: Condition::All {
+                    conditions: vec![
+                        Condition::DeviceConnected { device: "046d:c52b".into() },
+                        Condition::AudioDeviceExists { name: "microphone".into() },
+                        Condition::Not {
+                            condition: Box::new(Condition::DeviceConnected { device: "razer".into() }),
+                        },
+                    ],
+                },
+                then: vec![set("verdict", json!("devices ok"))],
+                else_steps: vec![],
+            },
+        ]);
+        let lib = MacroLibrary::default();
+        let (out, vars) = {
+            let mut st = ExecState {
+                lib: &lib,
+                services: &services,
+                vars: HashMap::new(),
+                cancel: CancellationToken::new(),
+                deadline: Instant::now() + Duration::from_secs(60),
+                loop_cap: 100,
+                loops: 0,
+                stack: vec!["t".into()],
+            };
+            (run_steps(&m.steps, &mut st).await, st.vars)
+        };
+        out.unwrap();
+        assert_eq!(vars["verdict"], json!("devices ok"));
+        // fuzzy match picked the Headphones id, not the default Speakers
+        assert_eq!(
+            *handles.audio_calls.lock().unwrap(),
+            vec!["set_default hp-id", "volume -10", "mute"]
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_and_file_conditions() {
+        let file = std::env::temp_dir().join(format!("keyforge_m6_{}.txt", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        let m = mac("t", vec![
+            Step::RunShellCommand { command: Param::Literal("echo from-macro".into()), timeout_ms: None },
+            Step::If {
+                condition: Condition::All {
+                    conditions: vec![
+                        Condition::VariableComparison {
+                            variable: "shell_stdout".into(),
+                            op: CmpOp::Eq,
+                            value: json!("from-macro"),
+                        },
+                        Condition::VariableComparison {
+                            variable: "shell_exit_code".into(),
+                            op: CmpOp::Eq,
+                            value: json!(0),
+                        },
+                        Condition::FileExists { path: file.to_string_lossy().into_owned() },
+                        Condition::DirectoryExists { path: std::env::temp_dir().to_string_lossy().into_owned() },
+                        Condition::Not {
+                            condition: Box::new(Condition::FileExists { path: "Z:/nope/ghost.bin".into() }),
+                        },
+                    ],
+                },
+                then: vec![set("verdict", json!("sys ok"))],
+                else_steps: vec![],
+            },
+        ]);
+        let (out, vars) = run(m).await;
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(out.unwrap(), Outcome::Completed);
+        assert_eq!(vars["verdict"], json!("sys ok"));
     }
 }

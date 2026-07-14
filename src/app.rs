@@ -32,6 +32,7 @@ pub struct KeyForgeApp {
     engine: Result<HotkeyEngine, String>,
     dispatcher: Dispatcher,
     macro_list: MacroLibrary,
+    devices: Option<(std::time::Instant, Vec<crate::audio::AudioDevice>, Vec<crate::usb::UsbDevice>)>,
     tab: Tab,
     tray: Tray,
     allow_close: bool,
@@ -73,6 +74,7 @@ impl KeyForgeApp {
             engine,
             dispatcher,
             macro_list,
+            devices: None,
             tab: Tab::Bindings,
             tray,
             allow_close: false,
@@ -234,7 +236,42 @@ impl KeyForgeApp {
                 });
             }
             Tab::Devices => {
-                ui.label("Connected audio and USB devices will appear here (Milestone 6).");
+                // live view, refreshed every 2s — this is the debugging aid for
+                // writing device conditions: names/IDs shown are what matchers see
+                let stale = self
+                    .devices
+                    .as_ref()
+                    .is_none_or(|(at, _, _)| at.elapsed() > std::time::Duration::from_secs(2));
+                if stale {
+                    let audio = self.dispatcher.services.audio.list().unwrap_or_default();
+                    let usb = self.dispatcher.services.usb.list().unwrap_or_default();
+                    self.devices = Some((std::time::Instant::now(), audio, usb));
+                }
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
+                let (_, audio, usb) = self.devices.as_ref().unwrap();
+
+                ui.label("Live device view — conditions and audio steps match against these names.");
+                ui.separator();
+                ui.strong(format!("Audio devices ({})", audio.len()));
+                egui::Grid::new("audio_devices").num_columns(3).striped(true).show(ui, |ui| {
+                    for d in audio {
+                        ui.label(if d.output { "output" } else { "input" });
+                        ui.label(&d.name);
+                        ui.weak(if d.default { "default" } else { "" });
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(8.0);
+                ui.strong(format!("USB devices ({})", usb.len()));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("usb_devices").num_columns(2).striped(true).show(ui, |ui| {
+                        for d in usb {
+                            ui.monospace(format!("{:04X}:{:04X}", d.vid, d.pid));
+                            ui.label(if d.name.is_empty() { d.instance_id.as_str() } else { d.name.as_str() });
+                            ui.end_row();
+                        }
+                    });
+                });
             }
             Tab::Log => {
                 ui.label("Live execution log will appear here (Milestone 3).");
