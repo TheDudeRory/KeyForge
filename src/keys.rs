@@ -29,6 +29,16 @@ pub fn combo_string(mods: egui::Modifiers, key: egui::Key) -> String {
     parts.join("+")
 }
 
+/// Pressing a bare modifier must not end the capture — egui 0.35 reports
+/// modifiers as key events too (Alt alone would record as "Alt+AltLeft").
+fn is_modifier_key(key: egui::Key) -> bool {
+    use egui::Key::*;
+    matches!(
+        key,
+        ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft | SuperRight
+    )
+}
+
 /// Click-to-record hotkey field: click, press a combo (Esc cancels).
 /// Returns true when a new combo was captured into `value`.
 pub fn hotkey_capture(
@@ -47,7 +57,9 @@ pub fn hotkey_capture(
     if capturing {
         let pressed = ui.input(|i| {
             i.events.iter().find_map(|ev| match ev {
-                egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                egui::Event::Key { key, pressed: true, modifiers, .. } if !is_modifier_key(*key) => {
+                    Some((*key, *modifiers))
+                }
                 _ => None,
             })
         });
@@ -92,6 +104,16 @@ mod tests {
         assert_eq!(combo_string(mods, egui::Key::K), "Ctrl+Alt+K");
         assert_eq!(combo_string(egui::Modifiers::NONE, egui::Key::F5), "F5");
         assert_eq!(combo_string(egui::Modifiers::SHIFT, egui::Key::Equals), "Shift+Equal");
+    }
+
+    #[test]
+    fn bare_modifiers_are_not_keys() {
+        use egui::Key::*;
+        for k in [ShiftLeft, ShiftRight, ControlLeft, ControlRight, AltLeft, AltRight, SuperLeft, SuperRight] {
+            assert!(is_modifier_key(k), "{k:?}");
+        }
+        assert!(!is_modifier_key(K));
+        assert!(!is_modifier_key(F5));
     }
 
     /// Every combo the capture widget can emit for these keys must parse back
