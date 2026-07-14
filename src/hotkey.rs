@@ -39,6 +39,41 @@ pub fn fire(targets: &TargetMap, hotkey: &str, dispatcher: &crate::exec::Dispatc
     }
 }
 
+/// The emergency stop must fire even while a macro holds extra modifiers —
+/// RegisterHotKey/XGrabKey match the exact modifier state, so a held Shift
+/// would mask the stop combo precisely when it's needed most. Register every
+/// modifier superset of the configured combo instead.
+fn emergency_supersets(normalized: &str) -> Vec<String> {
+    let mut tokens: Vec<&str> = normalized.split('+').collect();
+    let key = match tokens.pop() {
+        Some(k) if !k.is_empty() => k,
+        _ => return vec![normalized.to_string()],
+    };
+    fn canonical(t: &str) -> &str {
+        match t {
+            "control" => "ctrl",
+            "win" | "cmd" | "command" | "meta" => "super",
+            other => other,
+        }
+    }
+    let have: Vec<&str> = tokens.iter().map(|t| canonical(t)).collect();
+    const ALL: [&str; 4] = ["ctrl", "alt", "shift", "super"];
+    let free: Vec<&str> = ALL.into_iter().filter(|m| !have.contains(m)).collect();
+    (0..1u32 << free.len())
+        .map(|mask| {
+            let mut parts: Vec<&str> = ALL
+                .into_iter()
+                .filter(|m| {
+                    have.contains(m)
+                        || free.iter().position(|f| f == m).is_some_and(|i| mask & (1 << i) != 0)
+                })
+                .collect();
+            parts.push(key);
+            parts.join("+")
+        })
+        .collect()
+}
+
 pub struct HotkeyEngine {
     backend: Box<dyn HotkeyBackend>,
     targets: TargetMap,
@@ -58,7 +93,9 @@ impl HotkeyEngine {
         let mut desired: Vec<(String, FireTarget)> = Vec::new();
         let es = normalize(emergency_stop);
         if !es.is_empty() {
-            desired.push((es, FireTarget::EmergencyStop));
+            for superset in emergency_supersets(&es) {
+                desired.push((superset, FireTarget::EmergencyStop));
+            }
         }
         for binding in profile.bindings.iter().filter(|b| b.enabled) {
             let key = normalize(&binding.hotkey);
@@ -196,11 +233,31 @@ mod tests {
             &profile(vec![binding("Ctrl + Alt + K", true), binding("Ctrl+X", false), binding("", true)]),
         );
 
-        assert_eq!(applied.lock().unwrap()[0], vec!["ctrl+alt+end", "ctrl+alt+k"]);
+        assert_eq!(
+            applied.lock().unwrap()[0],
+            vec![
+                "ctrl+alt+end",
+                "ctrl+alt+shift+end",
+                "ctrl+alt+super+end",
+                "ctrl+alt+shift+super+end",
+                "ctrl+alt+k",
+            ]
+        );
         let map = targets.lock().unwrap();
         assert_eq!(map.get("ctrl+alt+end"), Some(&FireTarget::EmergencyStop));
+        // supersets fire the stop even while a macro holds extra modifiers
+        assert_eq!(map.get("ctrl+alt+shift+end"), Some(&FireTarget::EmergencyStop));
         assert!(matches!(map.get("ctrl+alt+k"), Some(FireTarget::Run(_))));
-        assert_eq!(map.len(), 2);
+        assert_eq!(map.len(), 5);
+    }
+
+    #[test]
+    fn emergency_superset_expansion() {
+        assert_eq!(emergency_supersets("f9"), vec!["f9", "ctrl+f9", "alt+f9", "ctrl+alt+f9", "shift+f9", "ctrl+shift+f9", "alt+shift+f9", "ctrl+alt+shift+f9", "super+f9", "ctrl+super+f9", "alt+super+f9", "ctrl+alt+super+f9", "shift+super+f9", "ctrl+shift+super+f9", "alt+shift+super+f9", "ctrl+alt+shift+super+f9"]);
+        assert_eq!(
+            emergency_supersets("ctrl+alt+shift+super+end"),
+            vec!["ctrl+alt+shift+super+end"]
+        );
     }
 
     #[test]

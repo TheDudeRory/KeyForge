@@ -1,3 +1,4 @@
+use crate::input::Inputs;
 use crate::macros::{CmpOp, Condition, Macro, MacroLibrary, Param, Step};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -21,6 +22,7 @@ pub enum ExecError {
     RuntimeLimit,
     LoopLimit,
     Eval(String),
+    Input(String),
     MacroNotFound(String),
     Recursion(String),
 }
@@ -32,6 +34,7 @@ impl std::fmt::Display for ExecError {
             ExecError::RuntimeLimit => write!(f, "max runtime exceeded (runaway guard)"),
             ExecError::LoopLimit => write!(f, "max loop iterations exceeded (runaway guard)"),
             ExecError::Eval(e) => write!(f, "evaluation error: {e}"),
+            ExecError::Input(e) => write!(f, "input error: {e}"),
             ExecError::MacroNotFound(id) => write!(f, "macro not found: {id}"),
             ExecError::Recursion(id) => write!(f, "recursion guard tripped at: {id}"),
         }
@@ -168,6 +171,7 @@ pub fn eval_condition(cond: &Condition, vars: &HashMap<String, Value>) -> Result
 
 struct ExecState<'a> {
     lib: &'a MacroLibrary,
+    inputs: &'a Inputs,
     vars: HashMap<String, Value>,
     cancel: CancellationToken,
     deadline: Instant,
@@ -293,6 +297,46 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
                         .collect::<Result<Vec<_>, _>>()?;
                     launch_program(&path, &args);
                 }
+                Step::SendKeystroke { keys } => {
+                    let combo = eval_string(keys, &st.vars)?;
+                    st.inputs.send_combo(&combo).map_err(ExecError::Input)?;
+                }
+                Step::TypeText { text, char_delay_ms } => {
+                    let text = eval_string(text, &st.vars)?;
+                    if *char_delay_ms == 0 {
+                        st.inputs.type_text(&text).map_err(ExecError::Input)?;
+                    } else {
+                        // Per-char typing stays cancellable between characters.
+                        for c in text.chars() {
+                            st.inputs.type_text(&c.to_string()).map_err(ExecError::Input)?;
+                            st.sleep(Duration::from_millis(*char_delay_ms)).await?;
+                        }
+                    }
+                }
+                Step::HoldKey { key } => {
+                    let key = eval_string(key, &st.vars)?;
+                    st.inputs.hold_key(&key).map_err(ExecError::Input)?;
+                }
+                Step::ReleaseKey { key } => {
+                    let key = eval_string(key, &st.vars)?;
+                    st.inputs.release_key(&key).map_err(ExecError::Input)?;
+                }
+                Step::MouseMove { x, y, relative } => {
+                    let (x, y) = (eval_i64(x, &st.vars)?, eval_i64(y, &st.vars)?);
+                    st.inputs.mouse_move(x as i32, y as i32, *relative).map_err(ExecError::Input)?;
+                }
+                Step::MouseClick { button, double } => {
+                    st.inputs.click(*button, *double).map_err(ExecError::Input)?;
+                }
+                Step::MouseDrag { from_x, from_y, to_x, to_y, button } => {
+                    let from = (eval_i64(from_x, &st.vars)? as i32, eval_i64(from_y, &st.vars)? as i32);
+                    let to = (eval_i64(to_x, &st.vars)? as i32, eval_i64(to_y, &st.vars)? as i32);
+                    st.inputs.drag(from, to, *button).map_err(ExecError::Input)?;
+                }
+                Step::Scroll { direction, amount } => {
+                    let amount = eval_i64(amount, &st.vars)?;
+                    st.inputs.scroll(*direction, amount as i32).map_err(ExecError::Input)?;
+                }
             }
         }
         Ok(Flow::Next)
@@ -304,10 +348,12 @@ fn run_steps<'a, 'b: 'a>(steps: &'a [Step], st: &'a mut ExecState<'b>) -> StepFu
 pub async fn execute_macro(
     mac: &Macro,
     lib: &MacroLibrary,
+    inputs: &Inputs,
     cancel: CancellationToken,
 ) -> Result<Outcome, ExecError> {
     let mut st = ExecState {
         lib,
+        inputs,
         vars: HashMap::new(),
         cancel,
         deadline: Instant::now()
@@ -369,6 +415,7 @@ impl Executions {
 pub struct Dispatcher {
     pub handle: tokio::runtime::Handle,
     pub executions: Arc<Executions>,
+    pub inputs: Arc<Inputs>,
     pub macros_dir: PathBuf,
 }
 
@@ -392,18 +439,22 @@ impl Dispatcher {
     pub fn spawn_macro(&self, mac: Macro, lib: MacroLibrary) {
         let (run_id, token) = self.executions.register(&mac.name);
         let executions = Arc::clone(&self.executions);
+        let inputs = Arc::clone(&self.inputs);
         self.handle.spawn(async move {
             let started = Instant::now();
             tracing::info!(id = %mac.id, name = %mac.name, run_id, "macro started");
             let elapsed = move || started.elapsed().as_millis() as u64;
-            match execute_macro(&mac, &lib, token).await {
+            match execute_macro(&mac, &lib, &inputs, token).await {
                 Ok(outcome) => {
+                    // A completed macro keeps deliberate holds; abnormal ends release.
                     tracing::info!(name = %mac.name, run_id, ?outcome, elapsed_ms = elapsed(), "macro finished")
                 }
                 Err(ExecError::Cancelled) => {
+                    inputs.release_all();
                     tracing::warn!(name = %mac.name, run_id, elapsed_ms = elapsed(), "macro cancelled")
                 }
                 Err(e) => {
+                    inputs.release_all();
                     tracing::error!(name = %mac.name, run_id, error = %e, elapsed_ms = elapsed(), "macro failed")
                 }
             }
@@ -413,8 +464,8 @@ impl Dispatcher {
 
     pub fn emergency_stop(&self) {
         let cancelled = self.executions.cancel_all();
-        // M4 will also release held keys/mouse buttons here.
-        tracing::warn!(cancelled, "EMERGENCY STOP");
+        let released = self.inputs.release_all();
+        tracing::warn!(cancelled, released, "EMERGENCY STOP");
     }
 }
 
@@ -454,8 +505,11 @@ mod tests {
     }
 
     async fn run_in_lib(m: Macro, lib: MacroLibrary) -> (Result<Outcome, ExecError>, HashMap<String, Value>) {
+        let (sim, _) = crate::input::test_support::RecordingSim::new();
+        let inputs = Inputs::with_backend(sim);
         let mut st = ExecState {
             lib: &lib,
+            inputs: &inputs,
             vars: HashMap::new(),
             cancel: CancellationToken::new(),
             deadline: Instant::now() + Duration::from_millis(m.max_runtime_ms.unwrap_or(DEFAULT_MAX_RUNTIME_MS)),
@@ -548,10 +602,65 @@ mod tests {
     async fn cancellation() {
         let m = mac("t", vec![Step::Wait { ms: Param::Literal(60_000) }]);
         let lib = MacroLibrary::default();
+        let (sim, _) = crate::input::test_support::RecordingSim::new();
+        let inputs = Inputs::with_backend(sim);
         let token = CancellationToken::new();
         token.cancel();
-        let err = execute_macro(&m, &lib, token).await.unwrap_err();
+        let err = execute_macro(&m, &lib, &inputs, token).await.unwrap_err();
         assert_eq!(err, ExecError::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn input_steps_drive_simulator() {
+        let (sim, events) = crate::input::test_support::RecordingSim::new();
+        let inputs = Inputs::with_backend(sim);
+        let m = mac("t", vec![
+            set("combo", json!("Ctrl+C")),
+            Step::SendKeystroke { keys: Param::Expr { expr: "combo".into() } },
+            Step::TypeText { text: Param::Literal("hi".into()), char_delay_ms: 50 },
+            Step::MouseMove { x: Param::Literal(10), y: Param::Literal(20), relative: false },
+            Step::MouseClick { button: crate::macros::MouseButton::Left, double: false },
+            Step::Scroll { direction: crate::macros::ScrollDirection::Down, amount: Param::Literal(3) },
+        ]);
+        let lib = MacroLibrary::default();
+        let out = execute_macro(&m, &lib, &inputs, CancellationToken::new()).await;
+        assert_eq!(out.unwrap(), Outcome::Completed);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "key Control Press",
+                "key Unicode('c') Press",
+                "key Unicode('c') Release",
+                "key Control Release",
+                "text \"h\"",
+                "text \"i\"",
+                "move abs 10,20",
+                "button Left Click",
+                "scroll Down 3",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn abnormal_end_release_path_reports_held() {
+        let (sim, _) = crate::input::test_support::RecordingSim::new();
+        let inputs = Inputs::with_backend(sim);
+        let m = mac("t", vec![
+            Step::HoldKey { key: Param::Literal("Shift".into()) },
+            Step::Wait { ms: Param::Literal(60_000) },
+        ]);
+        let lib = MacroLibrary::default();
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+        let err = execute_macro(&m, &lib, &inputs, token).await.unwrap_err();
+        task.await.unwrap();
+        assert_eq!(err, ExecError::Cancelled);
+        // what the dispatcher does on abnormal end:
+        assert_eq!(inputs.release_all(), 1);
     }
 
     #[tokio::test(start_paused = true)]

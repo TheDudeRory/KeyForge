@@ -4,6 +4,7 @@ mod app;
 mod bindings;
 mod exec;
 mod hotkey;
+mod input;
 mod keys;
 mod macros;
 mod persist;
@@ -94,6 +95,7 @@ fn main() -> eframe::Result {
     let dispatcher = exec::Dispatcher {
         handle: runtime.handle().clone(),
         executions: std::sync::Arc::default(),
+        inputs: std::sync::Arc::new(input::Inputs::new()),
         macros_dir: data.join("macros"),
     };
 

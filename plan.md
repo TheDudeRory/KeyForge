@@ -23,7 +23,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
 - [x] **M3 Macro engine** — Step/Macro serde model; tokio recursive async executor + cancellation;
       variables + Rhai expressions; control-flow steps; runaway guards (60s / 10k iterations); execution logging.
       Driven by hand-written JSON in `macros/`. Heavy unit tests.
-- [ ] **M4 Input simulation** — `InputSimulator` trait + enigo impl; keystroke/type/hold/mouse steps;
+- [x] **M4 Input simulation** — `InputSimulator` trait + enigo impl; keystroke/type/hold/mouse steps;
       held-input tracking → emergency stop releases everything.
 - [ ] **M5 Window management** — `WindowManager` trait; `windows` crate impl (SetForegroundWindow workarounds,
       elevated-window detection) + `x11rb`/EWMH impl; all window steps + window/process conditions;

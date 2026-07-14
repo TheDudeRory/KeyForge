@@ -41,6 +41,24 @@ pub enum Condition {
     // OS-backed conditions (window/process/device/pixel/...) land with M5/M6.
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    #[default]
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 fn default_poll_ms() -> u64 {
     100
 }
@@ -94,6 +112,46 @@ pub enum Step {
         #[serde(default)]
         args: Vec<Param<String>>,
     },
+    SendKeystroke {
+        keys: Param<String>,
+    },
+    TypeText {
+        text: Param<String>,
+        #[serde(default)]
+        char_delay_ms: u64,
+    },
+    HoldKey {
+        key: Param<String>,
+    },
+    ReleaseKey {
+        key: Param<String>,
+    },
+    MouseMove {
+        x: Param<i64>,
+        y: Param<i64>,
+        // ponytail: absolute/relative only; window-relative mode arrives with
+        // the WindowManager in M5.
+        #[serde(default)]
+        relative: bool,
+    },
+    MouseClick {
+        #[serde(default)]
+        button: MouseButton,
+        #[serde(default)]
+        double: bool,
+    },
+    MouseDrag {
+        from_x: Param<i64>,
+        from_y: Param<i64>,
+        to_x: Param<i64>,
+        to_y: Param<i64>,
+        #[serde(default)]
+        button: MouseButton,
+    },
+    Scroll {
+        direction: ScrollDirection,
+        amount: Param<i64>,
+    },
 }
 
 fn param_summary<T: std::fmt::Display>(p: &Param<T>) -> String {
@@ -120,6 +178,31 @@ impl Step {
             Step::StopMacro => "Stop macro".into(),
             Step::RunMacro { id } => format!("Run macro {id}"),
             Step::LaunchProgram { path, .. } => format!("Launch {}", param_summary(path)),
+            Step::SendKeystroke { keys } => format!("Press {}", param_summary(keys)),
+            Step::TypeText { text, .. } => {
+                let t = param_summary(text);
+                let short: String = t.chars().take(24).collect();
+                format!("Type {short:?}{}", if t.chars().count() > 24 { "…" } else { "" })
+            }
+            Step::HoldKey { key } => format!("Hold {}", param_summary(key)),
+            Step::ReleaseKey { key } => format!("Release {}", param_summary(key)),
+            Step::MouseMove { x, y, relative } => {
+                let how = if *relative { "by" } else { "to" };
+                format!("Mouse move {how} ({}, {})", param_summary(x), param_summary(y))
+            }
+            Step::MouseClick { button, double } => {
+                format!("{} {button:?}", if *double { "Double-click" } else { "Click" })
+            }
+            Step::MouseDrag { from_x, from_y, to_x, to_y, button } => format!(
+                "Drag {button:?} ({}, {}) → ({}, {})",
+                param_summary(from_x),
+                param_summary(from_y),
+                param_summary(to_x),
+                param_summary(to_y)
+            ),
+            Step::Scroll { direction, amount } => {
+                format!("Scroll {direction:?} {}", param_summary(amount))
+            }
         }
     }
 }
