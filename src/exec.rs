@@ -644,8 +644,8 @@ impl Dispatcher {
 
     pub fn run_macro_by_id(&self, id: &str) {
         let lib = MacroLibrary::load(&self.macros_dir);
-        let Some(mac) = lib.get(id).cloned() else {
-            tracing::error!(id, "macro not found in library");
+        let Some(mac) = lib.resolve(id).cloned() else {
+            tracing::error!(id, "macro not found in library (by id or name)");
             return;
         };
         self.spawn_macro(mac, lib);

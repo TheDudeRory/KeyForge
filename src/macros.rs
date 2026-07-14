@@ -456,6 +456,26 @@ impl MacroLibrary {
         self.macros.get(id)
     }
 
+    /// Lookup by id, falling back to a unique case-insensitive name match —
+    /// bindings written by hand often carry the macro's name, not its id.
+    pub fn resolve(&self, key: &str) -> Option<&Macro> {
+        if let Some(m) = self.macros.get(key) {
+            return Some(m);
+        }
+        let mut by_name = self
+            .macros
+            .values()
+            .filter(|m| m.name.eq_ignore_ascii_case(key.trim()));
+        match (by_name.next(), by_name.next()) {
+            (Some(m), None) => Some(m),
+            (Some(_), Some(_)) => {
+                tracing::warn!(key, "several macros share this name; use the id");
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Sorted by name for stable UI listing.
     pub fn iter_sorted(&self) -> Vec<&Macro> {
         let mut v: Vec<&Macro> = self.macros.values().collect();
@@ -567,6 +587,23 @@ mod tests {
         assert!(json.contains("\"disabled\": true"));
         // enabled blocks don't serialize the flag at all (clean diffs)
         assert_eq!(json.matches("disabled").count(), 1);
+    }
+
+    #[test]
+    fn resolve_by_id_then_unique_name() {
+        let dir = std::env::temp_dir().join(format!("keyforge_resolve_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (id, name) in [("m-1", "Focus Notepad"), ("m-2", "Other"), ("m-3", "Twin"), ("m-4", "Twin")] {
+            let m: Macro = serde_json::from_value(serde_json::json!({"id": id, "name": name})).unwrap();
+            crate::persist::save(&dir.join(format!("{id}.json")), &m);
+        }
+        let lib = MacroLibrary::load(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(lib.resolve("m-2").unwrap().id, "m-2");
+        assert_eq!(lib.resolve("focus notepad").unwrap().id, "m-1");
+        assert!(lib.resolve("Twin").is_none(), "ambiguous names must not resolve");
+        assert!(lib.resolve("ghost").is_none());
     }
 
     #[test]

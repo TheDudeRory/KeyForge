@@ -119,6 +119,13 @@ impl KeyForgeApp {
 
         let mut dirty = false;
         let mut remove: Option<usize> = None;
+        let macros: Vec<(String, String)> = self
+            .macro_list
+            .iter_sorted()
+            .into_iter()
+            .map(|m| (m.id.clone(), m.name.clone()))
+            .collect();
+        let resolves = |key: &str| self.macro_list.resolve(key).is_some();
         egui::Grid::new("bindings").num_columns(5).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.strong("On");
             ui.strong("Hotkey");
@@ -146,9 +153,21 @@ impl KeyForgeApp {
                         });
                     match &mut b.action {
                         Action::RunMacro { id } => {
-                            dirty |= ui
-                                .add(egui::TextEdit::singleline(id).hint_text("macro id"))
-                                .changed();
+                            let current = match self.macro_list.resolve(id) {
+                                Some(m) => m.name.clone(),
+                                None if id.is_empty() => "choose macro".into(),
+                                None => format!("{id} ⚠"),
+                            };
+                            egui::ComboBox::from_id_salt(("macro_pick", i))
+                                .selected_text(current)
+                                .show_ui(ui, |ui| {
+                                    for (mid, name) in &macros {
+                                        if ui.selectable_label(id == mid, name).clicked() {
+                                            *id = mid.clone();
+                                            dirty = true;
+                                        }
+                                    }
+                                });
                         }
                         Action::LaunchProgram { path, args } => {
                             dirty |= ui
@@ -174,12 +193,15 @@ impl KeyForgeApp {
                     Ok(engine) => engine.error_for(&b.hotkey).cloned(),
                     Err(_) => None,
                 };
+                let missing_macro = matches!(&b.action, Action::RunMacro { id } if !resolves(id));
                 if let Some(err) = error {
                     ui.colored_label(ui.visuals().error_fg_color, err);
                 } else if !b.enabled {
                     ui.weak("off");
                 } else if b.hotkey.is_empty() {
                     ui.weak("no hotkey set");
+                } else if missing_macro {
+                    ui.colored_label(ui.visuals().error_fg_color, "macro not found");
                 } else {
                     ui.weak("active");
                 }

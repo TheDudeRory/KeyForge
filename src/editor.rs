@@ -227,7 +227,7 @@ pub fn validate(mac: &Macro, lib: &MacroLibrary) -> Vec<String> {
                 Step::RunMacro { id } => {
                     if id.trim().is_empty() {
                         out.push(format!("{here}: no macro selected"));
-                    } else if id != &mac.id && lib.get(id).is_none() {
+                    } else if id != &mac.id && lib.resolve(id).is_none() {
                         out.push(format!("{here}: macro {id:?} not found in library"));
                     }
                 }
