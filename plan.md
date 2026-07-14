@@ -20,7 +20,7 @@ build order and per-milestone deliverables. One commit minimum per milestone.
       tray icon (Windows; Linux stub) with open/quit, close-to-tray.
 - [x] **M2 Hotkeys** — `HotkeyBackend` trait over `global-hotkey` on a dedicated thread; runtime (un)register;
       hardcoded binding → Launch Program; Bindings tab table + key-combo capture widget; emergency-stop hotkey (logs).
-- [ ] **M3 Macro engine** — Step/Macro serde model; tokio recursive async executor + cancellation;
+- [x] **M3 Macro engine** — Step/Macro serde model; tokio recursive async executor + cancellation;
       variables + Rhai expressions; control-flow steps; runaway guards (60s / 10k iterations); execution logging.
       Driven by hand-written JSON in `macros/`. Heavy unit tests.
 - [ ] **M4 Input simulation** — `InputSimulator` trait + enigo impl; keystroke/type/hold/mouse steps;

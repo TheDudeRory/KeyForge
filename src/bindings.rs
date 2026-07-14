@@ -6,8 +6,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
-    // ponytail: inline action until M3; bindings will then reference macro ids
-    // and Launch Program becomes a regular macro step.
+    RunMacro {
+        id: String,
+    },
     LaunchProgram {
         path: String,
         #[serde(default)]
@@ -18,19 +19,9 @@ pub enum Action {
 impl Action {
     pub fn summary(&self) -> String {
         match self {
+            Action::RunMacro { id } => format!("Run macro {id}"),
             Action::LaunchProgram { path, args } if args.is_empty() => format!("Launch {path}"),
             Action::LaunchProgram { path, args } => format!("Launch {path} {}", args.join(" ")),
-        }
-    }
-
-    pub fn execute(&self) {
-        match self {
-            Action::LaunchProgram { path, args } => {
-                match std::process::Command::new(path).args(args).spawn() {
-                    Ok(child) => tracing::info!(path, pid = child.id(), "launched program"),
-                    Err(e) => tracing::error!(path, error = %e, "failed to launch program"),
-                }
-            }
         }
     }
 }

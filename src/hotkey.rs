@@ -27,16 +27,13 @@ pub enum FireTarget {
 /// callback, which runs off the UI frame loop.
 pub type TargetMap = Arc<Mutex<HashMap<String, FireTarget>>>;
 
-pub fn fire(targets: &TargetMap, hotkey: &str) {
+pub fn fire(targets: &TargetMap, hotkey: &str, dispatcher: &crate::exec::Dispatcher) {
     let target = targets.lock().unwrap().get(hotkey).cloned();
     match target {
-        Some(FireTarget::EmergencyStop) => {
-            // ponytail: nothing to stop until the macro engine lands in M3.
-            tracing::warn!("EMERGENCY STOP pressed — macro engine arrives in M3, nothing to cancel yet");
-        }
+        Some(FireTarget::EmergencyStop) => dispatcher.emergency_stop(),
         Some(FireTarget::Run(action)) => {
             tracing::info!(hotkey, action = %action.summary(), "hotkey fired");
-            action.execute();
+            dispatcher.dispatch(&action);
         }
         None => tracing::warn!(hotkey, "hotkey fired with no bound target"),
     }
@@ -109,7 +106,7 @@ pub struct GlobalHotkeyBackend {
 }
 
 impl GlobalHotkeyBackend {
-    pub fn new(targets: TargetMap) -> Result<Self, String> {
+    pub fn new(targets: TargetMap, dispatcher: crate::exec::Dispatcher) -> Result<Self, String> {
         let manager = global_hotkey::GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
         let ids: Arc<Mutex<HashMap<u32, String>>> = Arc::default();
         let handler_ids = Arc::clone(&ids);
@@ -118,7 +115,7 @@ impl GlobalHotkeyBackend {
                 if event.state == global_hotkey::HotKeyState::Pressed {
                     let hotkey = handler_ids.lock().unwrap().get(&event.id).cloned();
                     if let Some(hotkey) = hotkey {
-                        fire(&targets, &hotkey);
+                        fire(&targets, &hotkey, &dispatcher);
                     }
                 }
             },

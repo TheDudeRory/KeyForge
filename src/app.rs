@@ -1,5 +1,7 @@
 use crate::bindings::{Action, Binding, Profile};
+use crate::exec::Dispatcher;
 use crate::hotkey::{GlobalHotkeyBackend, HotkeyEngine, TargetMap};
+use crate::macros::MacroLibrary;
 use crate::settings::{Settings, Theme};
 use crate::tray::{Tray, TrayEvent};
 use eframe::egui;
@@ -28,6 +30,8 @@ pub struct KeyForgeApp {
     settings: Settings,
     profile: Profile,
     engine: Result<HotkeyEngine, String>,
+    dispatcher: Dispatcher,
+    macro_list: MacroLibrary,
     tab: Tab,
     tray: Tray,
     allow_close: bool,
@@ -42,7 +46,12 @@ fn apply_theme(ctx: &egui::Context, theme: Theme) {
 }
 
 impl KeyForgeApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, settings: Settings) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: PathBuf,
+        settings: Settings,
+        dispatcher: Dispatcher,
+    ) -> Self {
         apply_theme(&cc.egui_ctx, settings.theme);
         let tray = Tray::new(cc.egui_ctx.clone());
         // Only start hidden when a tray icon exists to get the window back.
@@ -50,17 +59,20 @@ impl KeyForgeApp {
 
         let profile = Profile::load_or_create(&data_dir.join("profiles").join("default.json"));
         let targets: TargetMap = Default::default();
-        let engine = GlobalHotkeyBackend::new(Arc::clone(&targets))
+        let engine = GlobalHotkeyBackend::new(Arc::clone(&targets), dispatcher.clone())
             .map(|backend| HotkeyEngine::new(Box::new(backend), targets));
         if let Err(e) = &engine {
             tracing::error!(error = e, "hotkey backend unavailable");
         }
+        let macro_list = MacroLibrary::load(&dispatcher.macros_dir);
 
         let mut app = KeyForgeApp {
             data_dir,
             settings,
             profile,
             engine,
+            dispatcher,
+            macro_list,
             tab: Tab::Bindings,
             tray,
             allow_close: false,
@@ -103,11 +115,10 @@ impl KeyForgeApp {
 
         let mut dirty = false;
         let mut remove: Option<usize> = None;
-        egui::Grid::new("bindings").num_columns(6).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new("bindings").num_columns(5).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.strong("On");
             ui.strong("Hotkey");
-            ui.strong("Program");
-            ui.strong("Arguments");
+            ui.strong("Action");
             ui.strong("");
             ui.strong("Status");
             ui.end_row();
@@ -115,18 +126,43 @@ impl KeyForgeApp {
             for (i, b) in self.profile.bindings.iter_mut().enumerate() {
                 dirty |= ui.checkbox(&mut b.enabled, "").changed();
                 dirty |= crate::keys::hotkey_capture(ui, i, &mut b.hotkey);
-                let Action::LaunchProgram { path, args } = &mut b.action;
-                dirty |= ui.add(egui::TextEdit::singleline(path).hint_text("program path")).changed();
-                let mut joined = args.join(" ");
-                let args_edit = ui.add(
-                    egui::TextEdit::singleline(&mut joined).hint_text("args, space-separated"),
-                );
-                if args_edit.changed() {
-                    // ponytail: whitespace split — args containing spaces need a
-                    // JSON edit until the real param forms arrive in M7.
-                    *args = joined.split_whitespace().map(String::from).collect();
-                    dirty = true;
-                }
+                ui.horizontal(|ui| {
+                    let is_macro = matches!(b.action, Action::RunMacro { .. });
+                    egui::ComboBox::from_id_salt(("action_kind", i))
+                        .selected_text(if is_macro { "Run macro" } else { "Launch program" })
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(is_macro, "Run macro").clicked() && !is_macro {
+                                b.action = Action::RunMacro { id: String::new() };
+                                dirty = true;
+                            }
+                            if ui.selectable_label(!is_macro, "Launch program").clicked() && is_macro {
+                                b.action = Action::LaunchProgram { path: String::new(), args: vec![] };
+                                dirty = true;
+                            }
+                        });
+                    match &mut b.action {
+                        Action::RunMacro { id } => {
+                            dirty |= ui
+                                .add(egui::TextEdit::singleline(id).hint_text("macro id"))
+                                .changed();
+                        }
+                        Action::LaunchProgram { path, args } => {
+                            dirty |= ui
+                                .add(egui::TextEdit::singleline(path).hint_text("program path"))
+                                .changed();
+                            let mut joined = args.join(" ");
+                            let args_edit = ui.add(
+                                egui::TextEdit::singleline(&mut joined).hint_text("args, space-separated"),
+                            );
+                            if args_edit.changed() {
+                                // ponytail: whitespace split — args containing spaces
+                                // need a JSON edit until real param forms arrive in M7.
+                                *args = joined.split_whitespace().map(String::from).collect();
+                                dirty = true;
+                            }
+                        }
+                    }
+                });
                 if ui.button("✕").clicked() {
                     remove = Some(i);
                 }
@@ -171,7 +207,31 @@ impl KeyForgeApp {
         match self.tab {
             Tab::Bindings => self.bindings_tab(ui),
             Tab::Macros => {
-                ui.label("The macro library and editor will appear here (Milestones 3 & 7).");
+                ui.label("Macros are hand-written JSON files in keyforge_data/macros/ until the visual editor arrives (M7).");
+                ui.horizontal(|ui| {
+                    if ui.button("⟳ Reload").clicked() {
+                        self.macro_list = MacroLibrary::load(&self.dispatcher.macros_dir);
+                    }
+                    let running = self.dispatcher.executions.count();
+                    if ui.add_enabled(running > 0, egui::Button::new(format!("⏹ Stop all ({running} running)"))).clicked() {
+                        self.dispatcher.emergency_stop();
+                    }
+                    if running > 0 {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                    }
+                });
+                ui.separator();
+                egui::Grid::new("macro_list").num_columns(4).striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+                    for m in self.macro_list.iter_sorted() {
+                        if ui.button("▶ Run").clicked() {
+                            self.dispatcher.run_macro_by_id(&m.id);
+                        }
+                        ui.strong(&m.name);
+                        ui.monospace(&m.id);
+                        ui.weak(format!("{} steps", m.steps.len()));
+                        ui.end_row();
+                    }
+                });
             }
             Tab::Devices => {
                 ui.label("Connected audio and USB devices will appear here (Milestone 6).");

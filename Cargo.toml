@@ -7,8 +7,11 @@ edition = "2024"
 eframe = "0.35.0"
 global-hotkey = "0.8.0"
 rfd = "0.17.2"
+rhai = { version = "1.25.1", features = ["serde", "sync"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

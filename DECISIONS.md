@@ -6,4 +6,9 @@
 - **M2: hotkeys stored as strings** ("Ctrl+Alt+K") parsed by global-hotkey's own parser — no custom key model. The capture widget emits parser-compatible names (pinned by the `captured_names_parse` test). Super/Win modifier can't be captured (egui doesn't report it) but parses if hand-typed in JSON.
 - **M2: bindings carry an inline `launch_program` action** until macros exist; M3 switches bindings to macro references.
 - **M2: conflict policy** — duplicate combos badge the later row, first registrant stays active; the emergency stop registers first so it always wins.
+- **M3: macro variables are `serde_json::Value`**, not rhai `Dynamic`. A fresh Rhai engine + scope is built per expression eval (human-timescale, cost irrelevant), so nothing non-Send crosses an await and variables stay serializable (feeds M8's variable inspector for free).
+- **M3: Run Macro semantics** — sub-macros share the caller's variables, runtime deadline, and loop budget (guards cover the whole run); `Break` never escapes a macro boundary; `Stop Macro` stops the entire run including callers. Recursion = same id anywhere in the call stack, depth cap 16.
+- **M3: executor uses `tokio::time::Instant`** (identical to std in production) so runaway-guard tests run on tokio's paused clock deterministically.
+- **M3: conditions shipped now**: And/Or/Not groups, Rhai expression, variable comparison. The OS-backed ones (window/process/device/pixel/file/time) land with their backends in M5/M6.
+- **M3: macro library re-reads `macros/` from disk on every trigger fire** — files are tiny and hand-edited at this stage; caching/file-watching only if it ever shows up in profiling.
 - **eframe 0.35 API**: `App::update` was split into `logic()` (no painting) + `ui(&mut Ui)`, and `TopBottomPanel`/`SidePanel` merged into `egui::Panel`. Code follows the new API.

@@ -2,8 +2,10 @@
 
 mod app;
 mod bindings;
+mod exec;
 mod hotkey;
 mod keys;
+mod macros;
 mod persist;
 mod settings;
 mod tray;
@@ -84,6 +86,16 @@ fn main() -> eframe::Result {
     tracing::info!(data_dir = %data.display(), version = env!("CARGO_PKG_VERSION"), "KeyForge starting");
 
     let settings = settings::Settings::load_or_create(&data.join("settings.json"));
+    macros::seed_example(&data.join("macros"));
+
+    // Outlives run_native; macro executions run here so they never block the UI.
+    let runtime = tokio::runtime::Runtime::new()
+        .unwrap_or_else(|e| fatal(&format!("Cannot start async runtime: {e}")));
+    let dispatcher = exec::Dispatcher {
+        handle: runtime.handle().clone(),
+        executions: std::sync::Arc::default(),
+        macros_dir: data.join("macros"),
+    };
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -95,6 +107,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "KeyForge",
         options,
-        Box::new(move |cc| Ok(Box::new(app::KeyForgeApp::new(cc, data, settings)))),
+        Box::new(move |cc| Ok(Box::new(app::KeyForgeApp::new(cc, data, settings, dispatcher)))),
     )
 }
