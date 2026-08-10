@@ -1,6 +1,11 @@
 /target
 /keyforge_data
 
+# Node / Vite frontend
+node_modules
+dist
+.tsbuild
+*.tsbuildinfo
 
 # Added by cargo
 #
