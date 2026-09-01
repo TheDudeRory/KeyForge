@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { hotkeysList, hotkeysSave, type HotkeyBinding, type HotkeyAction } from "../lib/ipc";
-import { type MacroInfo } from "./MacroEditor";
+import { macrosRun, type MacroInfo } from "./MacroEditor";
 import { KeyField } from "./KeyPicker";
 import { useUi } from "../stores/settings";
 import "./macros.css";
@@ -25,7 +25,11 @@ const summarize = (a: HotkeyAction, macroName?: (id: string) => string): string 
   }
 };
 
-export default function HotkeyManager({ macros, reloadKey = 0 }: { macros: MacroInfo[]; reloadKey?: number }) {
+export default function HotkeyManager({ macros, reloadKey = 0, onEditMacro }: {
+  macros: MacroInfo[]; reloadKey?: number;
+  /** Opens the bound macro in the macro editor (owned by App). */
+  onEditMacro?: (id: string) => void;
+}) {
   const confirmOnDelete = useUi((s) => s.settings.confirmOnDelete);
   const macroName = (id: string) => macros.find((m) => m.id === id)?.name ?? id ?? "(none)";
 
@@ -143,10 +147,18 @@ export default function HotkeyManager({ macros, reloadKey = 0 }: { macros: Macro
             ) : (
               <>
                 <label style={label}>Macro</label>
-                <select style={field} value={selAction.id} onChange={(e) => setAction(selIdx, { type: "run_macro", id: e.target.value })}>
+                <select style={{ ...field, marginBottom: 6 }} value={selAction.id} onChange={(e) => setAction(selIdx, { type: "run_macro", id: e.target.value })}>
                   <option value="">— select macro —</option>
                   {macros.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
+                <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  <button className="mac-btn tiny" disabled={!selAction.id}
+                    title={selAction.id ? "Run this macro now" : "Select a macro first"}
+                    onClick={() => macrosRun(selAction.id).catch(() => {})}>▶ Run</button>
+                  <button className="mac-btn tiny" disabled={!selAction.id || !onEditMacro}
+                    title={selAction.id ? "Open this macro in the editor" : "Select a macro first"}
+                    onClick={() => selAction.id && onEditMacro?.(selAction.id)}>Edit</button>
+                </div>
                 {macros.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)" }}>No macros yet — create one in the Macros tab.</div>}
               </>
             )}

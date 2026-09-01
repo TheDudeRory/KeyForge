@@ -92,16 +92,9 @@ export const onMacroTestStep = (cb: (s: MacroTestStep) => void): Promise<Unliste
 export const onMacroTestDone = (cb: (d: MacroTestDone) => void): Promise<UnlistenFn> =>
   listen<MacroTestDone>("macro-test-done", (e) => cb(e.payload));
 
-// ── App-level global shortcuts ───────────────────────────────────────────────
-// Owned by lib.rs, distinct from the user's Global Hotkeys above: the
-// summon/hide toggle and the screenshot trigger. `screenshot` is stored and
-// validated but NOT registered with the OS — KeyForge has no capture of its own
-// (see the AppShortcuts doc comment in src-tauri/src/lib.rs). Editable from the
-// Keybinds settings category; persisted next to the exe.
-export interface AppShortcuts {
-  summon: string; // combo, e.g. "CmdOrCtrl+Alt+Backquote"
-  screenshot: string; // combo, e.g. "CmdOrCtrl+Alt+S"
-}
-export const appShortcutsGet = (): Promise<AppShortcuts> => invoke("app_shortcuts_get");
-export const appShortcutsSet = (s: AppShortcuts): Promise<void> =>
-  invoke("app_shortcuts_set", { summon: s.summon, screenshot: s.screenshot });
+// ── Tray ────────────────────────────────────────────────────────────────────
+// The tray icon itself is created in Rust at startup. Only the two behaviour
+// flags are the frontend's: Rust reads them when the window is closed or
+// minimised, so they must be pushed on hydrate and after every change.
+export const trayPrefsSet = (closeToTray: boolean, minimizeToTray: boolean): Promise<void> =>
+  invoke("tray_prefs_set", { closeToTray, minimizeToTray });

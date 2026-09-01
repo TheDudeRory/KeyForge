@@ -5,8 +5,12 @@ import type { MacroTestDone, MacroTestStep } from "../lib/ipc";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.resolve(null) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => undefined) }));
 
-const { EMPTY_RUN, runReducer, runStatusText, validateMacro } = await import("./MacroEditor");
+const {
+  EMPTY_RUN, runReducer, runStatusText, validateMacro,
+  conditionText, conditionChips, condAt, condSet, condRemove, condAdd, slotsOf, stepSummary,
+} = await import("./MacroEditor");
 type RunState = typeof EMPTY_RUN;
+type Condition = Parameters<typeof conditionText>[0];
 
 const step = (p: Partial<MacroTestStep>): { kind: "step"; ev: MacroTestStep } => ({
   kind: "step",
@@ -132,5 +136,74 @@ describe("validateMacro key tokens", () => {
   });
   it("still catches an empty key", () => {
     expect(validateMacro(macro([{ type: "hold_key", key: "" }]))[0]).toContain("no key set");
+  });
+});
+
+// ------------------------------------------------- conditions on the canvas
+const chrome: Condition = { type: "process_running", name: "chrome.exe" };
+const notFocused: Condition = { type: "not", condition: { type: "window_focused", window: { by: "process", name: "chrome.exe" } } };
+const both: Condition = { type: "all", conditions: [chrome, notFocused] };
+
+describe("conditionText", () => {
+  it("reads a leaf as a sentence", () => {
+    expect(conditionText(chrome)).toBe('process running "chrome.exe"');
+    expect(conditionText({ type: "variable_comparison", variable: "i", op: "lt", value: 20 })).toBe("i < 20");
+    expect(conditionText({ type: "clipboard_contains", pattern: "http", regex: true })).toBe("clipboard contains /http/");
+  });
+  it("joins groups and marks negation", () => {
+    expect(conditionText(both)).toBe('process running "chrome.exe" and not window focused: process "chrome.exe"');
+    expect(conditionText({ type: "any", conditions: [] })).toBe("(no conditions)");
+  });
+});
+
+describe("conditionChips", () => {
+  it("splits the top level and carries the joiner", () => {
+    const { chips, join } = conditionChips(both);
+    expect(join).toBe("AND");
+    expect(chips.map((c) => c.path)).toEqual([[0], [1]]);
+    expect(chips[1]).toMatchObject({ neg: true, text: 'window focused: process "chrome.exe"' });
+  });
+  it("a non-group condition is one chip rooted at the tree", () => {
+    const { chips } = conditionChips(chrome);
+    expect(chips).toEqual([{ path: [], text: 'process running "chrome.exe"' }]);
+  });
+  it("marks a nested group so precedence stays visible", () => {
+    const nested: Condition = { type: "all", conditions: [chrome, { type: "any", conditions: [chrome, chrome] }] };
+    expect(conditionChips(nested).chips[1].group).toBe(true);
+  });
+});
+
+describe("condition tree edits", () => {
+  it("reads and writes through a path", () => {
+    expect(condAt(both, [0])).toEqual(chrome);
+    expect(condAt(both, [1])).toEqual(notFocused);
+    const next = condSet(both, [0], { type: "expr", expr: "n > 3" });
+    expect(condAt(next, [0])).toEqual({ type: "expr", expr: "n > 3" });
+    expect(condAt(next, [1])).toEqual(notFocused); // siblings untouched
+  });
+  it("collapses the group when a removal leaves one child", () => {
+    expect(condRemove(both, [1])).toEqual(chrome);
+  });
+  it("keeps the group while two or more children remain", () => {
+    const three: Condition = { type: "all", conditions: [chrome, chrome, notFocused] };
+    expect(condRemove(three, [2])).toEqual({ type: "all", conditions: [chrome, chrome] });
+  });
+  it("wraps a lone condition in an AND group when one is added", () => {
+    expect(condAdd(chrome)).toEqual({ type: "all", conditions: [chrome, { type: "expr", expr: "true" }] });
+    expect(condAdd(both)).toEqual({ type: "all", conditions: [chrome, notFocused, { type: "expr", expr: "true" }] });
+  });
+});
+
+describe("control block presentation", () => {
+  it("summaries name the condition instead of an ellipsis", () => {
+    expect(stepSummary({ type: "if", condition: chrome })).toBe('If process running "chrome.exe"');
+    expect(stepSummary({ type: "while", condition: chrome })).toBe('While process running "chrome.exe"');
+  });
+  it("branch slots carry a tone and a display label", () => {
+    expect(slotsOf({ type: "if" })).toEqual([
+      { key: "then", label: "Then", tone: "then" },
+      { key: "else", label: "Else", tone: "else" },
+    ]);
+    expect(slotsOf({ type: "while" })[0]).toEqual({ key: "steps", label: "Repeat", tone: "loop" });
   });
 });

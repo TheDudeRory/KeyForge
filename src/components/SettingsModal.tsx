@@ -91,9 +91,20 @@ function GeneralCategory() {
           <option value="devices">Devices</option>
         </select>
       </div>
-      <div style={{ ...row, borderBottom: "none" }}>
+      <div style={row}>
         <span style={label}>Confirm before deleting a hotkey or macro</span>
         <input type="checkbox" checked={settings.confirmOnDelete} onChange={(e) => update({ confirmOnDelete: e.target.checked })} />
+      </div>
+      <div style={row}>
+        <span style={label}>Close to tray <span style={{ color: "var(--muted)", fontSize: 10 }}>(closing the window keeps hotkeys running)</span></span>
+        <input type="checkbox" checked={settings.closeToTray} onChange={(e) => update({ closeToTray: e.target.checked })} />
+      </div>
+      <div style={{ ...row, borderBottom: "none" }}>
+        <span style={label}>Minimize to tray <span style={{ color: "var(--muted)", fontSize: 10 }}>(minimising hides the window)</span></span>
+        <input type="checkbox" checked={settings.minimizeToTray} onChange={(e) => update({ minimizeToTray: e.target.checked })} />
+      </div>
+      <div style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}>
+        The tray icon is always there: click it to show or hide the window, right-click for Stop all macros and Quit.
       </div>
 
       <div style={{ marginTop: 18, paddingTop: 10, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>

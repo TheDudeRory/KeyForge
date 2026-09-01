@@ -94,19 +94,7 @@ describe("macro test-run ipc wrappers", () => {
   });
 });
 
-describe("app shortcut + state ipc wrappers", () => {
-  it("flattens AppShortcuts into the two arguments app_shortcuts_set declares", async () => {
-    await ipc.appShortcutsGet();
-    await ipc.appShortcutsSet({ summon: "CmdOrCtrl+Alt+Backquote", screenshot: "CmdOrCtrl+Alt+S" });
-    expect(calls).toEqual([
-      { cmd: "app_shortcuts_get", args: undefined },
-      {
-        cmd: "app_shortcuts_set",
-        args: { summon: "CmdOrCtrl+Alt+Backquote", screenshot: "CmdOrCtrl+Alt+S" },
-      },
-    ]);
-  });
-
+describe("state ipc wrappers", () => {
   it("uses the portable-state command names src-tauri/src/state.rs registers", async () => {
     await ipc.loadState();
     await ipc.saveState("{}");

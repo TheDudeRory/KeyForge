@@ -6,6 +6,7 @@ import SettingsModal from "./components/SettingsModal";
 import { MacroEditor, macrosDelete, macrosList, macrosRun, macrosStopAll, type MacroInfo } from "./components/MacroEditor";
 import { useUi } from "./stores/settings";
 import { actionFor } from "./lib/keymap";
+import { trayPrefsSet } from "./lib/ipc";
 import type { TabId } from "./lib/persist";
 import "./components/macros.css";
 import "./App.css";
@@ -29,6 +30,8 @@ export default function App() {
   const theme = useUi((s) => s.settings.theme);
   const uiScale = useUi((s) => s.settings.uiScale);
   const confirmOnDelete = useUi((s) => s.settings.confirmOnDelete);
+  const closeToTray = useUi((s) => s.settings.closeToTray);
+  const minimizeToTray = useUi((s) => s.settings.minimizeToTray);
 
   const [macros, setMacros] = useState<MacroInfo[]>([]);
   // Bumped to make the Hotkeys panel re-read the profile from Rust.
@@ -49,6 +52,13 @@ export default function App() {
   // fixed position, outside the app shell) inherit them too.
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => { document.documentElement.style.fontSize = `${16 * uiScale}px`; }, [uiScale]);
+
+  // Rust owns the window's close/minimize interception, so it needs the current
+  // tray flags — pushed once the persisted settings are in, and after each edit.
+  useEffect(() => {
+    if (!hydrated) return;
+    trayPrefsSet(closeToTray, minimizeToTray).catch(() => {});
+  }, [hydrated, closeToTray, minimizeToTray]);
 
   // Central key handler for the in-app keymap. Capture phase so a binding still
   // fires from inside an input, EXCEPT while a text field has focus and the
@@ -97,7 +107,7 @@ export default function App() {
 
       <div className="kf-body">
         {!hydrated ? null : tab === "hotkeys" ? (
-          <HotkeyManager macros={macros} reloadKey={reloadKey} />
+          <HotkeyManager macros={macros} reloadKey={reloadKey} onEditMacro={(id) => setEditing(id)} />
         ) : tab === "macros" ? (
           <div className="mac-lib">
             <div className="mac-lib-toolbar">

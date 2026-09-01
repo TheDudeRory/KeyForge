@@ -327,6 +327,15 @@ pub fn macros_run(rt: State<HotkeyRuntime>, id: String) {
     rt.dispatcher.run_macro_by_id(&id);
 }
 
+/// Same emergency stop as the `macros_stop_all` command, for callers that only
+/// hold an `AppHandle` (the tray menu). Returns how many runs were cancelled.
+pub fn stop_all(app: &tauri::AppHandle) -> usize {
+    let Some(rt) = app.try_state::<HotkeyRuntime>() else { return 0 };
+    let n = rt.dispatcher.executions.count();
+    rt.dispatcher.emergency_stop();
+    n
+}
+
 /// Emergency "Stop all": cancel every running macro + release held keys/mouse.
 /// Returns how many executions were live (best-effort informational count).
 #[tauri::command]

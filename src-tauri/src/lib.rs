@@ -44,7 +44,7 @@ pub fn apply_linux_webview_env() {
     }
 }
 
-/// Toggle the main window (for the global summon/hide hotkey).
+/// Toggle the main window (tray icon / single-instance handler).
 fn toggle_main_window(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(win) = app.get_webview_window("main") {
@@ -57,80 +57,68 @@ fn toggle_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Default app-level global shortcuts. These are owned by lib.rs, distinct from
-/// the user's Global Hotkeys in the `hotkeys` module, and are editable from the
-/// Keybinds settings category via `app_shortcuts_get`/`app_shortcuts_set`.
-const SCREENSHOT_SHORTCUT: &str = "CmdOrCtrl+Alt+S";
-const SUMMON_SHORTCUT: &str = "CmdOrCtrl+Alt+Backquote";
-
-/// The app-level global shortcuts, persisted next to the exe so a rebind
-/// survives restarts (portable, same dir as `keyforge.json`).
-///
-/// `screenshot` is stored and validated but NOT registered with the OS: KeyForge
-/// has no capture of its own (that lived in the app this engine was lifted
-/// from), and grabbing a system-wide combo that does nothing would only steal it
-/// from the user's real screenshot tool. The field stays so the setting — and
-/// the UI that edits it — survives until something claims it.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct AppShortcuts {
-    summon: String,
-    screenshot: String,
+/// What the window's close button and minimise do. Owned by the frontend
+/// (keyforge.json) and pushed here with `tray_prefs_set` on every change,
+/// because only Rust can intercept the window events. Defaults are "act like a
+/// normal window" — until the UI has hydrated, closing really does quit.
+#[derive(Clone, Copy, Default)]
+struct TrayPrefs {
+    close_to_tray: bool,
+    minimize_to_tray: bool,
 }
 
-impl Default for AppShortcuts {
-    fn default() -> Self {
-        Self { summon: SUMMON_SHORTCUT.into(), screenshot: SCREENSHOT_SHORTCUT.into() }
-    }
+fn tray_prefs_cell() -> &'static std::sync::Mutex<TrayPrefs> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<TrayPrefs>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(TrayPrefs::default()))
 }
 
-/// Process-wide current values, read by the global-shortcut handler.
-fn app_shortcuts_cell() -> &'static std::sync::Mutex<AppShortcuts> {
-    static CELL: std::sync::OnceLock<std::sync::Mutex<AppShortcuts>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| std::sync::Mutex::new(AppShortcuts::default()))
-}
-
-fn app_shortcuts_file() -> Result<std::path::PathBuf, String> {
-    Ok(state::state_dir()?.join("app-shortcuts.json"))
-}
-
-fn load_app_shortcuts() -> AppShortcuts {
-    app_shortcuts_file()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-/// Current app-level global shortcuts (summon/hide + screenshot), for the UI.
 #[tauri::command]
-fn app_shortcuts_get() -> AppShortcuts {
-    app_shortcuts_cell().lock().unwrap().clone()
+fn tray_prefs_set(close_to_tray: bool, minimize_to_tray: bool) {
+    *tray_prefs_cell().lock().unwrap() = TrayPrefs { close_to_tray, minimize_to_tray };
 }
 
-/// Rebind the app-level global shortcuts: unregister the old summon combo,
-/// register the new one with the OS, persist both, and update the live value the
-/// handler reads. The screenshot combo is validated and stored only — see
-/// `AppShortcuts`.
-#[tauri::command]
-fn app_shortcuts_set(app: tauri::AppHandle, summon: String, screenshot: String) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
-    use std::str::FromStr;
-    Shortcut::from_str(&screenshot).map_err(|e| format!("screenshot '{screenshot}': {e}"))?;
-    let gs = app.global_shortcut();
-    {
-        let cur = app_shortcuts_cell().lock().unwrap();
-        if let Ok(sc) = cur.summon.parse::<Shortcut>() {
-            let _ = gs.unregister(sc);
-        }
+/// The tray icon: click to show/hide, right-click for the menu. Always built —
+/// it is the only way back to a window that was closed to the tray, and the only
+/// way out of the app once closing no longer quits.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::with_id(app, "show", "Show / hide window", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "Stop all macros", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit KeyForge", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &stop, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id("main")
+        .tooltip("KeyForge")
+        .menu(&menu)
+        // Left click toggles the window; the menu is right-click only.
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => toggle_main_window(app),
+            "stop" => {
+                hotkeys::stop_all(app);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
     }
-    gs.register(summon.as_str()).map_err(|e| format!("summon '{summon}': {e}"))?;
-    let next = AppShortcuts { summon, screenshot };
-    if let Ok(p) = app_shortcuts_file() {
-        let _ = std::fs::write(p, serde_json::to_string_pretty(&next).unwrap_or_default());
-    }
-    *app_shortcuts_cell().lock().unwrap() = next;
+    builder.build(app)?;
     Ok(())
 }
+
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -161,23 +149,13 @@ pub fn run() {
                     if hotkeys::handle_estop(app, shortcut) {
                         return;
                     }
-                    // Otherwise it is either one of the user's Global Hotkeys or
-                    // the summon/hide toggle — nothing else is registered.
-                    if !hotkeys::dispatch(app, shortcut) {
-                        toggle_main_window(app);
-                    }
+                    // Otherwise dispatch to the user's Global Hotkeys.
+                    hotkeys::dispatch(app, shortcut);
                 })
                 .build(),
         )
         .setup(|app| {
             use tauri::Manager;
-            use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            // App-level global shortcuts, from the persisted app-shortcuts.json
-            // if present, else the defaults. Editable at runtime via
-            // app_shortcuts_set (Keybinds settings category).
-            let app_sc = load_app_shortcuts();
-            let _ = app.global_shortcut().register(app_sc.summon.as_str());
-            *app_shortcuts_cell().lock().unwrap() = app_sc;
             // Register the user's Global Hotkeys from the persisted
             // hotkeys/default.json profile, and start the macro engine.
             hotkeys::init(app.handle());
@@ -188,7 +166,31 @@ pub fn run() {
             if let Ok(dir) = state::screenshots_dir() {
                 let _ = app.asset_protocol_scope().allow_directory(&dir, true);
             }
+            // Never fatal: a desktop with no tray host (bare X session, some
+            // Wayland setups) must still get its window.
+            if let Err(e) = build_tray(app.handle()) {
+                eprintln!("keyforge: tray icon unavailable: {e}");
+            }
             Ok(())
+        })
+        .on_window_event(|win, event| {
+            let prefs = *tray_prefs_cell().lock().unwrap();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } if prefs.close_to_tray => {
+                    api.prevent_close();
+                    let _ = win.hide();
+                }
+                // Tauri has no "minimised" event: a minimise arrives as a resize
+                // whose window then reports is_minimized(). Unminimise before
+                // hiding, or the window comes back from the tray still minimised.
+                tauri::WindowEvent::Resized(_) if prefs.minimize_to_tray => {
+                    if win.is_minimized().unwrap_or(false) {
+                        let _ = win.unminimize();
+                        let _ = win.hide();
+                    }
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             state::load_state,
@@ -216,8 +218,7 @@ pub fn run() {
             hotkeys::devices_audio_sessions,
             hotkeys::set_app_volume,
             hotkeys::devices_usb,
-            app_shortcuts_get,
-            app_shortcuts_set,
+            tray_prefs_set,
             app_version
         ])
         .run(tauri::generate_context!())

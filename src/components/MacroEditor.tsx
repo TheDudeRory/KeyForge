@@ -164,17 +164,22 @@ const DEF_BY_TYPE = new Map(STEP_DEFS.map((d) => [d.type, d]));
 const CATEGORIES = ["Control", "Input", "Windows", "Devices", "System"];
 
 // Slots (child block lists) a container step exposes — mirrors Step::child_lists.
-interface Slot { key: string; label: string; }
+// `tone` colours the branch rail + nesting spine so "which arm am I in" survives
+// several levels of nesting.
+export type SlotTone = "then" | "else" | "loop";
+interface Slot { key: string; label: string; tone: SlotTone; }
 export function slotsOf(step: { type: string }): Slot[] {
   switch (step.type) {
-    case "if": return [{ key: "then", label: "then" }, { key: "else", label: "else" }];
-    case "loop": return [{ key: "steps", label: "do" }];
-    case "while": return [{ key: "steps", label: "do" }];
-    case "wait_until": return [{ key: "on_timeout", label: "on timeout" }];
+    case "if": return [{ key: "then", label: "Then", tone: "then" }, { key: "else", label: "Else", tone: "else" }];
+    case "loop": return [{ key: "steps", label: "Repeat", tone: "loop" }];
+    case "while": return [{ key: "steps", label: "Repeat", tone: "loop" }];
+    case "wait_until": return [{ key: "on_timeout", label: "On timeout", tone: "else" }];
     default: return [];
   }
 }
 const isContainer = (s: { type: string }) => slotsOf(s).length > 0;
+const endCapText = (type: string): string =>
+  type === "if" ? "End if" : type === "while" ? "End while" : type === "loop" ? "End loop" : "End wait";
 
 // -------------------------------------------------------- summaries (log line)
 const ps = (p: unknown): string => (isExpr(p) ? `(${p.expr})` : String(p));
@@ -187,15 +192,99 @@ const describeSel = (w?: WindowSelector): string => {
     case "class": return `class "${w.name}"`;
   }
 };
+// ------------------------------------------------ conditions as readable text
+// A control block's condition is its headline, not a hidden inspector field:
+// conditionText renders any Condition as one sentence, conditionChips splits the
+// top level into the pills the block header shows.
+const OP_TEXT: Record<CmpOp, string> = { eq: "=", ne: "≠", lt: "<", gt: ">", contains: "contains" };
+const q = (v: unknown): string => (typeof v === "string" ? `"${v}"` : JSON.stringify(v));
+
+export function conditionText(c: Condition): string {
+  switch (c.type) {
+    case "all": return c.conditions.length ? c.conditions.map(conditionText).join(" and ") : "(no conditions)";
+    case "any": return c.conditions.length ? c.conditions.map(conditionText).join(" or ") : "(no conditions)";
+    case "not": return `not ${conditionText(c.condition)}`;
+    case "expr": return c.expr.trim() || "(empty expression)";
+    case "variable_comparison": return `${c.variable} ${OP_TEXT[c.op]} ${q(c.value)}`;
+    case "window_exists": return `window exists: ${describeSel(c.window)}`;
+    case "window_focused": return `window focused: ${describeSel(c.window)}`;
+    case "window_title_matches": return `window title matches /${c.pattern}/`;
+    case "process_running": return `process running ${q(c.name)}`;
+    case "device_connected": return `device connected ${q(c.device)}`;
+    case "audio_device_exists": return `audio device ${q(c.name)} exists`;
+    case "audio_device_is_default": return `audio device ${q(c.name)} is default`;
+    case "file_exists": return `file exists ${q(c.path)}`;
+    case "directory_exists": return `folder exists ${q(c.path)}`;
+    case "pixel_color_at": return `pixel (${c.x}, ${c.y}) is ${c.color}${c.tolerance ? ` ±${c.tolerance}` : ""}`;
+    case "clipboard_contains": return `clipboard contains ${c.regex ? `/${c.pattern}/` : q(c.pattern)}`;
+    case "time_is_between": return `time is between ${c.start} and ${c.end}`;
+    case "day_of_week_is": return `day is ${c.days.length ? c.days.join(" / ") : "(no days)"}`;
+  }
+}
+
+// Path into a Condition tree: child index per all/any level, 0 for a `not`.
+export type CondPath = number[];
+export interface CondChip { path: CondPath; text: string; neg?: boolean; group?: boolean; }
+
+function chipOf(c: Condition, path: CondPath): CondChip {
+  // `not` keeps its own path so clicking the chip edits the negation itself.
+  if (c.type === "not") return { path, text: conditionText(c.condition), neg: true };
+  if (c.type === "all" || c.type === "any") return { path, text: `(${conditionText(c)})`, group: true };
+  return { path, text: conditionText(c) };
+}
+export function conditionChips(c: Condition): { chips: CondChip[]; join: "AND" | "OR" } {
+  if ((c.type === "all" || c.type === "any") && c.conditions.length)
+    return { join: c.type === "all" ? "AND" : "OR", chips: c.conditions.map((child, i) => chipOf(child, [i])) };
+  return { join: "AND", chips: [chipOf(c, [])] };
+}
+
+export function condAt(root: Condition, path: CondPath): Condition {
+  let c = root;
+  for (const i of path) {
+    if (c.type === "all" || c.type === "any") c = c.conditions[i];
+    else if (c.type === "not") c = c.condition;
+    else break;
+  }
+  return c;
+}
+export function condSet(root: Condition, path: CondPath, next: Condition): Condition {
+  if (path.length === 0) return next;
+  const [i, ...rest] = path;
+  if (root.type === "all" || root.type === "any")
+    return { ...root, conditions: root.conditions.map((c, j) => (j === i ? condSet(c, rest, next) : c)) };
+  if (root.type === "not") return { type: "not", condition: condSet(root.condition, rest, next) };
+  return next;
+}
+// Removing the last-but-one child of an and/or group collapses the group away,
+// so the header never shows a one-item "(x)" wrapper.
+export function condRemove(root: Condition, path: CondPath): Condition {
+  if (path.length === 0) return { type: "expr", expr: "true" };
+  const [i, ...rest] = path;
+  if (root.type === "all" || root.type === "any") {
+    if (rest.length === 0) {
+      const kept = root.conditions.filter((_, j) => j !== i);
+      return kept.length === 1 ? kept[0] : { ...root, conditions: kept };
+    }
+    return { ...root, conditions: root.conditions.map((c, j) => (j === i ? condRemove(c, rest) : c)) };
+  }
+  if (root.type === "not") return rest.length === 0 ? { type: "expr", expr: "true" } : { type: "not", condition: condRemove(root.condition, rest) };
+  return root;
+}
+export function condAdd(root: Condition): Condition {
+  const fresh: Condition = { type: "expr", expr: "true" };
+  if (root.type === "all" || root.type === "any") return { ...root, conditions: [...root.conditions, fresh] };
+  return { type: "all", conditions: [root, fresh] };
+}
+
 export function stepSummary(s: Step): string {
   const w = s.window as WindowSelector | undefined;
   switch (s.type) {
-    case "if": return "If …";
+    case "if": return `If ${conditionText(s.condition as Condition)}`;
     case "loop": return `Loop ${ps(s.times)}×`;
-    case "while": return "While …";
+    case "while": return `While ${conditionText(s.condition as Condition)}`;
     case "break": return "Break";
     case "wait": return `Wait ${ps(s.ms)} ms`;
-    case "wait_until": return `Wait until (timeout ${s.timeout_ms} ms)`;
+    case "wait_until": return `Wait until ${conditionText(s.condition as Condition)} (timeout ${s.timeout_ms} ms)`;
     case "set_variable": return `Set ${s.name} = ${ps(s.value)}`;
     case "stop_macro": return "Stop macro";
     case "run_macro": return `Run macro ${s.id || "?"}`;
@@ -357,6 +446,9 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
   const [drag, setDrag] = useState<DragState>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [ctx, setCtx] = useState<{ x: number; y: number; path: Path } | null>(null);
+  // Branch folds are view-only state, keyed "<blockPath>|<slotKey>" — never saved.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [condPop, setCondPop] = useState<{ x: number; y: number; path: Path; cond: CondPath } | null>(null);
   const [search, setSearch] = useState("");
   const [showWarns, setShowWarns] = useState(false);
   const undoRef = useRef<string[]>([]);
@@ -441,6 +533,24 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
     }, { clearSel: true });
   }, [commit]);
 
+  const toggleCollapse = useCallback((key: string) => {
+    setCollapsed((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  }, []);
+
+  // Chip click → edit that sub-condition in place. The inspector stays
+  // authoritative for the whole tree; this covers the common single-leaf edit.
+  const editCond = useCallback((path: Path, cond: CondPath, e: React.MouseEvent) => {
+    setCtx(null);
+    setSel(new Set([pathKey(path)])); setAnchor(path);
+    setCondPop({ x: e.clientX, y: e.clientY, path, cond });
+  }, []);
+  const addCond = useCallback((path: Path) => {
+    commit((m) => {
+      const b = getBlock(m, path);
+      if (b?.condition) b.condition = condAdd(b.condition as Condition);
+    });
+  }, [commit]);
+
   const selectedPaths = useMemo<Path[]>(() => macro ? [...sel].map((k) => k.split("/").map((s) => (/^\d+$/.test(s) ? Number(s) : s))) : [], [sel, macro]);
 
   // selection handling -----------------------------------------------------
@@ -487,6 +597,8 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
       const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
+      // Escape closes the condition popover even from inside its own fields.
+      if (e.key === "Escape" && condPop) { e.preventDefault(); setCondPop(null); return; }
       if (typing) return;
       const paths = selectedPaths;
       if (e.key === "Delete" && paths.length) { e.preventDefault(); deletePaths(paths); }
@@ -497,7 +609,7 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, selectedPaths, deletePaths, doCopy, doCut, pasteBelow, ctx, onClose]);
+  }, [undo, redo, selectedPaths, deletePaths, doCopy, doCut, pasteBelow, ctx, condPop, onClose]);
 
   // validation (save-time warnings) ---------------------------------------
   const warnings = useMemo<string[]>(() => (macro ? validateMacro(macro) : []), [macro]);
@@ -595,7 +707,7 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
   const palItems = STEP_DEFS.filter((d) => !search || d.label.toLowerCase().includes(search.toLowerCase()) || d.type.includes(search.toLowerCase()));
 
   return (
-    <div className="mac-editor" onClick={() => ctx && setCtx(null)}>
+    <div className="mac-editor" onClick={() => { if (ctx) setCtx(null); if (condPop) setCondPop(null); }}>
       <div className="mac-editor-head">
         <input className="mac-name" value={macro.name} placeholder="Macro name"
           onChange={(e) => { setMacro({ ...macro, name: e.target.value }); setDirty(true); }} />
@@ -660,6 +772,7 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
             list={macro.steps} listPath={[]}
             sel={sel} onBlockClick={onBlockClick}
             drag={drag} dropTarget={dropTarget} setDropTarget={setDropTarget} onDrop={handleDrop} setDrag={setDrag}
+            collapsed={collapsed} toggleCollapse={toggleCollapse} onEditCond={editCond} onAddCond={addCond}
             onCtx={(path, e) => { e.preventDefault(); e.stopPropagation(); if (!sel.has(pathKey(path))) { setSel(new Set([pathKey(path)])); setAnchor(path); } setCtx({ x: e.clientX, y: e.clientY, path }); }}
           />
         </div>
@@ -719,6 +832,28 @@ export function MacroEditor({ macroId, onClose, onSaved }: { macroId: string | n
         </div>
       )}
 
+      {condPop && (() => {
+        const blk = getBlock(macro, condPop.path);
+        const root = blk?.condition as Condition | undefined;
+        if (!root) return null;
+        const setRoot = (next: Condition) => patchBlock(condPop.path, { condition: next });
+        return (
+          <div className="mac-condpop" onClick={(e) => e.stopPropagation()}
+            style={{ left: Math.min(condPop.x, window.innerWidth - 320), top: Math.min(condPop.y + 12, window.innerHeight - 380) }}>
+            <div className="mac-condpop-head">
+              <span>{condPop.cond.length ? "Condition" : "Whole condition"}</span>
+              <button className="mac-btn tiny" onClick={() => setCondPop(null)}>Done</button>
+            </div>
+            <ConditionEditor value={condAt(root, condPop.cond)} onChange={(c) => setRoot(condSet(root, condPop.cond, c))} />
+            {condPop.cond.length > 0 && (
+              <button className="mac-btn danger tiny" onClick={() => { setRoot(condRemove(root, condPop.cond)); setCondPop(null); }}>
+                Remove this condition
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
       {ctx && (
         <div className="mac-ctx" style={{ left: Math.min(ctx.x, window.innerWidth - 180), top: Math.min(ctx.y, window.innerHeight - 240) }} onClick={(e) => e.stopPropagation()}>
           <CtxItem label="Cut" k="Ctrl+X" onClick={() => { doCut(selectedPaths); setCtx(null); }} />
@@ -740,14 +875,21 @@ function CtxItem({ label, k, onClick, disabled }: { label: string; k?: string; o
 }
 
 // -------------------------------------------------------- recursive block list
-function BlockList(props: {
-  list: Block[]; listPath: Path;
+interface TreeProps {
   sel: Set<string>; onBlockClick: (p: Path, e: React.MouseEvent) => void;
   drag: DragState; dropTarget: string | null; setDropTarget: (s: string | null) => void;
   onDrop: (listPath: Path, idx: number) => void; setDrag: (d: DragState) => void;
   onCtx: (p: Path, e: React.MouseEvent) => void;
-}) {
-  const { list, listPath, drag } = props;
+  collapsed: Set<string>; toggleCollapse: (key: string) => void;
+  onEditCond: (blockPath: Path, condPath: CondPath, e: React.MouseEvent) => void;
+  onAddCond: (blockPath: Path) => void;
+}
+
+function BlockList(props: TreeProps & { list: Block[]; listPath: Path }) {
+  // `tree` is the tail without list/listPath — spreading the whole props object
+  // into BlockNode would hand a child its parent's blk/path and recurse forever.
+  const { list, listPath, ...tree } = props;
+  const { drag } = props;
   const dz = (idx: number) => {
     const key = `${pathKey(listPath)}#${idx}`;
     const over = props.dropTarget === key && !!drag;
@@ -765,7 +907,7 @@ function BlockList(props: {
         const path = [...listPath, i];
         return (
           <div key={i}>
-            <BlockNode blk={blk} path={path} {...props} />
+            <BlockNode {...tree} blk={blk} path={path} />
             {dz(i + 1)}
           </div>
         );
@@ -774,45 +916,124 @@ function BlockList(props: {
   );
 }
 
-function BlockNode(props: {
-  blk: Block; path: Path;
-  sel: Set<string>; onBlockClick: (p: Path, e: React.MouseEvent) => void;
-  drag: DragState; dropTarget: string | null; setDropTarget: (s: string | null) => void;
-  onDrop: (listPath: Path, idx: number) => void; setDrag: (d: DragState) => void;
-  onCtx: (p: Path, e: React.MouseEvent) => void;
-}) {
-  const { blk, path } = props;
+// A control block's header reads as a sentence: keyword + condition pills. Long
+// conditions truncate to "+N more" rather than wrapping — the header stays one
+// line so a tall macro still scans as a column of actions.
+const MAX_HEAD_CHIPS = 3;
+interface CtrlHead { kw: string; tone: "if" | "loop"; chips: CondChip[]; join: "AND" | "OR"; meta?: string; editable: boolean; }
+function ctrlHeadOf(blk: Block): CtrlHead | null {
+  const cond = blk.condition as Condition | undefined;
+  switch (blk.type) {
+    case "if": case "while": {
+      if (!cond) return null;
+      const { chips, join } = conditionChips(cond);
+      return { kw: blk.type === "if" ? "If" : "While", tone: blk.type === "if" ? "if" : "loop", chips, join, editable: true };
+    }
+    case "wait_until": {
+      if (!cond) return null;
+      const { chips, join } = conditionChips(cond);
+      return { kw: "Wait until", tone: "if", chips, join, editable: true,
+        meta: `poll ${(blk.poll_ms as number) ?? 100} ms · timeout ${(blk.timeout_ms as number) ?? 10000} ms` };
+    }
+    case "loop":
+      // Keyword stays "Loop" — the branch rail below it is the one that says Repeat.
+      return { kw: "Loop", tone: "loop", join: "AND", editable: false,
+        chips: [{ path: [], text: `${ps(blk.times)} times` }] };
+    default: return null;
+  }
+}
+
+function BlockNode(props: TreeProps & { blk: Block; path: Path }) {
+  const { blk, path, ...tree } = props;
   const selected = props.sel.has(pathKey(path));
   const container = isContainer(blk);
+  const head = container ? ctrlHeadOf(blk) : null;
+
+  const shown = head ? (head.chips.length > MAX_HEAD_CHIPS ? head.chips.slice(0, MAX_HEAD_CHIPS - 1) : head.chips) : [];
+  const hidden = head ? head.chips.length - shown.length : 0;
+
+  const dragHandlers = {
+    draggable: true,
+    onDragStart: (e: React.DragEvent) => {
+      e.stopPropagation();
+      // Empty dataTransfer => WebKitGTK aborts the drag before dragover.
+      e.dataTransfer.setData("text/plain", pathKey(path));
+      e.dataTransfer.effectAllowed = "move";
+      props.setDrag({ kind: "move", path });
+    },
+    onDragEnd: () => props.setDrag(null),
+    onClick: (e: React.MouseEvent) => { e.stopPropagation(); props.onBlockClick(path, e); },
+  };
+
   return (
-    <div className={`mac-block${selected ? " selected" : ""}${blk.disabled ? " disabled" : ""}${container ? " container" : ""}`}
+    <div className={`mac-block${selected ? " selected" : ""}${blk.disabled ? " disabled" : ""}${container ? " container" : ""}${head ? ` mac-ctrl mac-ctrl-${head.tone}` : ""}`}
       onContextMenu={(e) => props.onCtx(path, e)}>
-      <div className="mac-block-head"
-        draggable
-        onDragStart={(e) => {
-          e.stopPropagation();
-          // Empty dataTransfer => WebKitGTK aborts the drag before dragover.
-          e.dataTransfer.setData("text/plain", pathKey(path));
-          e.dataTransfer.effectAllowed = "move";
-          props.setDrag({ kind: "move", path });
-        }}
-        onDragEnd={() => props.setDrag(null)}
-        onClick={(e) => { e.stopPropagation(); props.onBlockClick(path, e); }}>
-        <span className="mac-grip">⠿</span>
-        <span className="mac-block-title">
-          <span className="mac-block-kind">{stepLabel(blk.type)}</span>
-          <span className="mac-block-sum">{stepSummary(blk as Step)}</span>
-        </span>
-      </div>
-      {container && slotsOf(blk).map((slot) => (
-        <div className="mac-slot" key={slot.key}>
-          <div className="mac-slot-label">{slot.label}</div>
-          <BlockList list={(blk[slot.key] as Block[]) ?? []} listPath={[...path, slot.key]}
-            sel={props.sel} onBlockClick={props.onBlockClick}
-            drag={props.drag} dropTarget={props.dropTarget} setDropTarget={props.setDropTarget}
-            onDrop={props.onDrop} setDrag={props.setDrag} onCtx={props.onCtx} />
+
+      {head ? (
+        <div className="mac-block-head mac-ctrl-head" {...dragHandlers}>
+          <span className="mac-grip">⠿</span>
+          <span className={`mac-kw mac-kw-${head.tone}`}>{head.kw}</span>
+          <span className="mac-cond-chips">
+            {shown.map((chip, i) => (
+              <span key={i}>
+                {i > 0 && <span className="mac-join">{head.join}</span>}
+                <button className={`mac-chip${chip.group ? " group" : ""}`} title={chip.text}
+                  disabled={!head.editable}
+                  onClick={(e) => { e.stopPropagation(); if (head.editable) props.onEditCond(path, chip.path, e); }}>
+                  {chip.neg && <span className="neg">not</span>}
+                  <span className="txt">{chip.text}</span>
+                </button>
+              </span>
+            ))}
+            {hidden > 0 && (
+              <>
+                <span className="mac-join">{head.join}</span>
+                <button className="mac-chip more" title="Edit the whole condition"
+                  onClick={(e) => { e.stopPropagation(); props.onEditCond(path, [], e); }}>+{hidden} more</button>
+              </>
+            )}
+            {head.editable && (
+              <button className="mac-chip add" title="Add a condition"
+                onClick={(e) => { e.stopPropagation(); props.onAddCond(path); }}>＋</button>
+            )}
+          </span>
+          {head.meta && <span className="mac-ctrl-meta">{head.meta}</span>}
         </div>
-      ))}
+      ) : (
+        <div className="mac-block-head" {...dragHandlers}>
+          <span className="mac-grip">⠿</span>
+          <span className="mac-block-title">
+            <span className="mac-block-kind">{stepLabel(blk.type)}</span>
+            <span className="mac-block-sum">{stepSummary(blk as Step)}</span>
+          </span>
+        </div>
+      )}
+
+      {container && slotsOf(blk).map((slot) => {
+        const kids = (blk[slot.key] as Block[]) ?? [];
+        const ckey = `${pathKey(path)}|${slot.key}`;
+        // A collapsed branch is force-opened while a drag is in flight, else the
+        // drop strips inside it are unreachable.
+        const folded = props.collapsed.has(ckey) && !props.drag;
+        return (
+          <div className={`mac-branch mac-branch-${slot.tone}`} key={slot.key}>
+            <div className="mac-rail" onClick={(e) => { e.stopPropagation(); props.toggleCollapse(ckey); }}>
+              <span className="mac-rail-chev">{folded ? "▸" : "▾"}</span>
+              {slot.label}
+              <span className="mac-rail-count">
+                {kids.length === 0 ? "empty" : `${kids.length} action${kids.length > 1 ? "s" : ""}${folded ? ", collapsed" : ""}`}
+              </span>
+            </div>
+            {!folded && (
+              <div className="mac-branch-kids">
+                <BlockList {...tree} list={kids} listPath={[...path, slot.key]} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {head && <div className="mac-endcap">{endCapText(blk.type)}</div>}
     </div>
   );
 }

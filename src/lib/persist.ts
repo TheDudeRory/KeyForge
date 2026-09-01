@@ -15,6 +15,10 @@ export interface Settings {
   uiScale: number; // whole-interface zoom factor, 1 = 100%
   startTab: TabId; // which tab the window opens on
   confirmOnDelete: boolean; // ask before deleting a macro / hotkey
+  // Tray behaviour. Owned here but ALSO pushed to Rust (tray_prefs_set), which
+  // is what actually intercepts the window's close/minimize.
+  closeToTray: boolean; // window X hides to the tray instead of quitting
+  minimizeToTray: boolean; // minimising hides to the tray
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -22,6 +26,8 @@ export const DEFAULT_SETTINGS: Settings = {
   uiScale: 1,
   startTab: "hotkeys",
   confirmOnDelete: true,
+  closeToTray: false,
+  minimizeToTray: false,
 };
 
 export interface Persisted {

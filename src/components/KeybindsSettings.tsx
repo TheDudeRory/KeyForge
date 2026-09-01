@@ -1,13 +1,12 @@
 import { type CSSProperties, useEffect, useState } from "react";
 import { useUi } from "../stores/settings";
 import { KEYBIND_ACTIONS, eventToCombo, normalizeCombo } from "../lib/keymap";
-import { appShortcutsGet, appShortcutsSet, hotkeysList, hotkeysSetEstop, type AppShortcuts } from "../lib/ipc";
+import { hotkeysList, hotkeysSetEstop } from "../lib/ipc";
 
 // Keybinds settings category (registry entry in SettingsModal.tsx). Edits the
-// three layers a combo can live in, in order of reach:
+// two layers a combo can live in, in order of reach:
 //   1. the persisted in-app `keymap` (window-focused actions, handled in App.tsx)
-//   2. the OS-level app shortcuts owned by Rust (summon/hide + screenshot)
-//   3. the emergency stop, always registered so it can kill a running macro
+//   2. the emergency stop, always registered so it can kill a running macro
 // The same keymap is what the central key handler reads, so nothing drifts.
 
 const label: CSSProperties = { fontSize: 12, color: "var(--muted)" };
@@ -73,60 +72,7 @@ export default function KeybindsSettings() {
         <button onClick={() => resetKeymap()} style={{ ...field, cursor: "pointer" }}>Reset to defaults</button>
       </div>
 
-      <GlobalShortcuts />
       <EmergencyStop />
-    </div>
-  );
-}
-
-// The two OS-level app shortcuts live in Rust (editable via app_shortcuts_set).
-// They use the plugin's combo syntax (e.g. "CmdOrCtrl+Alt+S"), so they are edited
-// as text and applied on Save rather than key-captured.
-function GlobalShortcuts() {
-  const [sc, setSc] = useState<AppShortcuts | null>(null);
-  const [msg, setMsg] = useState("");
-
-  useEffect(() => {
-    appShortcutsGet().then(setSc).catch(() => setSc(null));
-  }, []);
-
-  if (!sc) {
-    return (
-      <p style={{ marginTop: 16, fontSize: 11, color: "var(--muted)" }}>
-        System-wide global shortcuts are unavailable (no Tauri backend).
-      </p>
-    );
-  }
-
-  const save = async () => {
-    setMsg("Applying…");
-    try {
-      await appShortcutsSet(sc);
-      setMsg("Saved.");
-    } catch (e) {
-      setMsg(`Failed: ${e}`);
-    }
-  };
-
-  return (
-    <div style={{ marginTop: 16, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>Global (system-wide)</div>
-      <p style={{ margin: "0 0 8px", fontSize: 11, color: "var(--muted)" }}>
-        Registered with the OS so they work while other apps are focused. Use the plugin syntax,
-        e.g. <code>CmdOrCtrl+Alt+S</code>.
-      </p>
-      <div style={row}>
-        <span style={label}>Show / hide window</span>
-        <input style={{ ...field, width: 200 }} value={sc.summon} onChange={(e) => setSc({ ...sc, summon: e.target.value })} />
-      </div>
-      <div style={row}>
-        <span style={label}>Screenshot combo <span style={{ fontSize: 10 }}>(stored only — KeyForge has no capture)</span></span>
-        <input style={{ ...field, width: 200 }} value={sc.screenshot} onChange={(e) => setSc({ ...sc, screenshot: e.target.value })} />
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-end", marginTop: 10 }}>
-        {msg && <span style={{ fontSize: 11, color: "var(--muted)" }}>{msg}</span>}
-        <button onClick={save} style={{ ...field, cursor: "pointer", background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" }}>Apply global shortcuts</button>
-      </div>
     </div>
   );
 }

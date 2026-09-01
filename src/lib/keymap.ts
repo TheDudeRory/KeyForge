@@ -1,7 +1,7 @@
 // The in-app keymap: combos handled by the WEBVIEW while KeyForge has focus.
 // Distinct from the two OS-level things a combo can also mean here:
 //   - Global Hotkeys (hotkeys/default.json, Rust) — fire while any app is focused
-//   - app shortcuts (summon/hide, Rust lib.rs) — fire while any app is focused
+//   - user global hotkeys (Rust hotkeys module) — fire while any app is focused
 // This map is only the window's own commands, and both the central key handler
 // (App.tsx) and the Keybinds settings category read it, so nothing drifts.
 

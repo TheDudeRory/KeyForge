@@ -28,8 +28,9 @@
 .mac-lib-row:hover { background: var(--panel-2); }
 .mac-lib-row .mac-lib-name { flex: 1; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mac-lib-row .mac-lib-desc { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mac-lib-actions { display: flex; gap: 6px; opacity: 0; transition: opacity .1s; }
-.mac-lib-row:hover .mac-lib-actions { opacity: 1; }
+/* Row actions stay visible — hunting for a button by hovering hides what the
+   list can do. */
+.mac-lib-actions { display: flex; gap: 6px; flex: 0 0 auto; }
 
 /* Generic buttons */
 .mac-btn {
@@ -92,8 +93,81 @@
 .mac-block-head .mac-block-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mac-block-head .mac-block-kind { font-weight: 700; }
 .mac-block-head .mac-block-sum { color: var(--muted); font-weight: 400; margin-left: 6px; }
-.mac-slot { margin: 2px 0 6px 22px; border-left: 2px solid var(--border); padding-left: 8px; }
-.mac-slot-label { font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--muted); text-transform: uppercase; padding: 4px 0 2px; }
+/* ------------------------------------------- control blocks (if / while / …)
+   A control block reads as a sentence: keyword + condition chips on the header,
+   branch rails that carry the same weight as an action row, and an end cap so a
+   long branch does not just trail off. Branch tones are editor-scoped so the
+   light theme can darken them without touching the app palette. */
+.mac-editor { --then: #4bbf6b; --else: #e0a860; --loop: #9b7bf0; }
+:root[data-theme="light"] .mac-editor { --then: #1f8a49; --else: #a86a12; --loop: #6b4fd0; }
+
+.mac-ctrl { overflow: hidden; }
+.mac-ctrl-if { border-left: 3px solid var(--accent); }
+.mac-ctrl-loop { border-left: 3px solid var(--loop); }
+
+.mac-ctrl-head { gap: 7px; }
+.mac-kw {
+  flex: 0 0 auto; font-family: "Cascadia Code", "MesloLGS Nerd Font Mono", Hack, ui-monospace, monospace;
+  font-size: 11px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase;
+}
+.mac-kw-if { color: var(--accent); }
+.mac-kw-loop { color: var(--loop); }
+
+/* nowrap + overflow: long conditions truncate to "+N more", never wrap */
+.mac-cond-chips { flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px; flex-wrap: nowrap; overflow: hidden; }
+.mac-cond-chips > span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
+.mac-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 34ch;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px 7px; font-size: 11.5px; color: var(--text); cursor: pointer;
+  font-family: "Cascadia Code", "MesloLGS Nerd Font Mono", Hack, ui-monospace, monospace;
+}
+.mac-chip:hover:not(:disabled), .mac-chip:focus-visible { border-color: var(--accent); outline: none; }
+.mac-chip:disabled { cursor: default; }
+.mac-chip .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mac-chip .neg { color: #e07a7a; font-weight: 700; flex: 0 0 auto; }
+.mac-chip.group { border-style: dashed; }
+.mac-chip.more { color: var(--muted); }
+.mac-chip.add { color: var(--muted); padding: 2px 6px; flex: 0 0 auto; }
+.mac-chip.add:hover { color: var(--text); }
+.mac-join { flex: 0 0 auto; font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--muted); }
+.mac-ctrl-meta { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+/* branch rail — a row, not a caption; the tone also tints the nesting spine */
+.mac-branch { margin-left: 12px; border-left: 2px solid var(--border); }
+.mac-branch-then { border-left-color: var(--then); }
+.mac-branch-else { border-left-color: var(--else); }
+.mac-branch-loop { border-left-color: var(--loop); }
+.mac-rail {
+  display: flex; align-items: center; gap: 7px; padding: 5px 9px 5px 10px; cursor: pointer; user-select: none;
+  font-family: "Cascadia Code", "MesloLGS Nerd Font Mono", Hack, ui-monospace, monospace;
+  font-size: 11px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase;
+  background: linear-gradient(90deg, color-mix(in srgb, currentColor 13%, transparent), transparent 62%);
+}
+.mac-branch-then .mac-rail { color: var(--then); }
+.mac-branch-else .mac-rail { color: var(--else); }
+.mac-branch-loop .mac-rail { color: var(--loop); }
+.mac-rail:hover { filter: brightness(1.15); }
+.mac-rail-chev { color: var(--muted); font-size: 10px; }
+.mac-rail-count { margin-left: auto; color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 11px; }
+.mac-branch-kids { padding: 2px 8px 6px 9px; }
+
+.mac-endcap {
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-top: 1px dashed var(--border);
+  font-family: "Cascadia Code", "MesloLGS Nerd Font Mono", Hack, ui-monospace, monospace;
+  font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+}
+
+/* inline condition editor popover (chip click) */
+.mac-condpop {
+  position: fixed; z-index: 145; width: 300px; max-height: 370px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 9px;
+  box-shadow: 0 12px 44px rgba(0,0,0,.6);
+}
+.mac-condpop-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px;
+  font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+}
 
 /* drop indicator — 4px is too thin to aim at, so an invisible pseudo-element
    grows the hit box to ~14px without moving anything on the page. */
@@ -180,7 +254,9 @@
 .mac-run-err { color: #f2b0b0; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ------------------------------------------------------------- devices */
-.mac-devices { display: flex; flex-direction: column; height: 100%; }
+/* flex/width mirror .mac-lib: .kf-body is a flex row, so without these the tab
+   only takes its content width instead of the whole window. */
+.mac-devices { display: flex; flex-direction: column; height: 100%; flex: 1; width: 100%; min-width: 0; }
 .mac-dev-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .mac-dev-body { flex: 1; overflow-y: auto; padding: 10px 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .mac-dev-col h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
