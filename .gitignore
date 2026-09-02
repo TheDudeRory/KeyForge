@@ -7,6 +7,10 @@ dist
 .tsbuild
 *.tsbuildinfo
 
+# Agent-specific files (kept local, not committed)
+AGENTS.md
+CLAUDE.md
+
 # Added by cargo
 #
 # already existing elements were commented out
